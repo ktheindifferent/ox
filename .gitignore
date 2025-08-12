@@ -1,4 +1,6 @@
 /target
-*.log
-bomb.txt
-src/]
+*.swp
+*.swo
+*.swn
+/.vscode
+*.html

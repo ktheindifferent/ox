@@ -1,0 +1,565 @@
+-- Configure Events --
+event_mapping = {
+    -- Cursor movement
+    ["up"] = function() 
+        editor:move_up() 
+    end,
+    ["down"] = function() 
+        editor:move_down() 
+    end,
+    ["left"] = function() 
+        editor:move_left() 
+    end,
+    ["right"] = function() 
+        editor:move_right() 
+    end,
+    ["ctrl_up"] = function() 
+        editor:move_top() 
+    end,
+    ["ctrl_down"] = function() 
+        editor:move_bottom() 
+    end,
+    ["ctrl_left"] = function() 
+        editor:move_previous_word() 
+    end,
+    ["ctrl_right"] = function() 
+        editor:move_next_word() 
+    end,
+    ["home"] = function() 
+        editor:move_home() 
+    end,
+    ["end"] = function() 
+        editor:move_end() 
+    end,
+    ["pageup"] = function() 
+        editor:move_page_up() 
+    end,
+    ["pagedown"] = function() 
+        editor:move_page_down() 
+    end,
+    ["alt_v"] = function()
+        editor:cursor_to_viewport()
+    end,
+    ["ctrl_g"] = function()
+        local line = editor:prompt("Go to line")
+        editor:move_to(0, tonumber(line))
+    end,
+    -- Selection
+    ["shift_up"] = function()
+        editor:select_up()
+    end,
+    ["shift_down"] = function()
+        editor:select_down()
+    end,
+    ["shift_left"] = function()
+        editor:select_left()
+    end,
+    ["shift_right"] = function()
+        editor:select_right()
+    end,
+    ["esc"] = function()
+        editor:cancel_selection()
+    end,
+    ["shift_home"] = function()
+        local n_moves = editor.cursor.x
+        for i = 1, n_moves do
+            editor:select_left()
+        end
+    end,
+    ["shift_end"] = function()
+        local n_moves = #editor:get_line() - editor.cursor.x
+        for i = 1, n_moves do
+            editor:select_right()
+        end
+    end,
+    ["ctrl_shift_left"] = function()
+        local no_select = editor.cursor.x == editor.selection.x and editor.cursor.y == editor.selection.y
+        if no_select then
+            local cache = editor.cursor
+            editor:move_previous_word()
+            local after = editor.cursor
+            editor:move_to(cache.x, cache.y)
+            editor:select_to(after.x, after.y)
+        else
+            local start = editor.selection
+            editor:move_previous_word()
+            local cache = editor.cursor
+            editor:move_to(start.x, start.y)
+            editor:select_to(cache.x, cache.y)
+        end
+    end,
+    ["ctrl_shift_right"] = function()
+        local no_select = editor.cursor.x == editor.selection.x and editor.cursor.y == editor.selection.y
+        if no_select then
+            local cache = editor.cursor
+            editor:move_next_word()
+            local after = editor.cursor
+            editor:move_to(cache.x, cache.y)
+            editor:select_to(after.x, after.y)
+        else
+            local start = editor.selection
+            editor:move_next_word()
+            local cache = editor.cursor
+            editor:move_to(start.x, start.y)
+            editor:select_to(cache.x, cache.y)
+        end
+    end,
+    ["shift_pageup"] = function()
+        local no_select = editor.cursor.x == editor.selection.x and editor.cursor.y == editor.selection.y
+        if no_select then
+            local cache = editor.cursor
+            editor:move_page_up()
+            local after = editor.cursor
+            editor:move_to(cache.x, cache.y)
+            editor:select_to(after.x, after.y)
+        else
+            local start = editor.selection
+            editor:move_page_up()
+            local cache = editor.cursor
+            editor:move_to(start.x, start.y)
+            editor:select_to(cache.x, cache.y)
+        end
+    end,
+    ["shift_pagedown"] = function()
+        local no_select = editor.cursor.x == editor.selection.x and editor.cursor.y == editor.selection.y
+        if no_select then
+            local cache = editor.cursor
+            editor:move_page_down()
+            local after = editor.cursor
+            editor:move_to(cache.x, cache.y)
+            editor:select_to(after.x, after.y)
+        else
+            local start = editor.selection
+            editor:move_page_down()
+            local cache = editor.cursor
+            editor:move_to(start.x, start.y)
+            editor:select_to(cache.x, cache.y)
+        end
+    end,
+    -- Searching & Replacing
+    ["ctrl_f"] = function()
+        editor:search()
+    end,
+    ["ctrl_r"] = function()
+        editor:replace()
+    end,
+    -- Document Management
+    ["ctrl_n"] = function()
+        editor:new()
+    end,
+    ["ctrl_o"] = function()
+        editor:open()
+    end,
+    ["ctrl_s"] = function()
+        editor:save()
+    end,
+    ["alt_s"] = function()
+        editor:save_as()
+    end,
+    ["alt_a"] = function()
+        editor:save_all()
+    end,
+    ["ctrl_q"] = function()
+        editor:quit()
+    end,
+    ["alt_left"] = function()
+        editor:previous_tab()
+    end,
+    ["alt_right"] = function()
+        editor:next_tab()
+    end,
+    -- Clipboard Interaction
+    ["ctrl_a"] = function()
+        editor:select_all()
+    end,
+    ["ctrl_x"] = function()
+        editor:cut()
+    end,
+    ["ctrl_c"] = function()
+        editor:copy()
+    end,
+    ["ctrl_v"] = function()
+        editor:display_info("Use ctrl+shift+v for paste or set your terminal emulator to do paste on ctrl+v")
+    end,
+    -- Undo & Redo
+    ["ctrl_z"] = function()
+        editor:undo()
+    end,
+    ["ctrl_y"] = function()
+        editor:redo()
+    end,
+    -- Miscellaneous
+    ["ctrl_h"] = function()
+        help_message.enabled = not help_message.enabled
+    end,
+    ["ctrl_d"] = function()
+        local cursor = editor.cursor
+        local select = editor.selection
+        local no_select = select.x == cursor.x and select.y == cursor.y
+        if no_select then
+            editor:remove_line()
+        else
+            -- delete a group of lines
+            if cursor.y > select.y then
+                editor:move_to(cursor.x, select.y)
+                for line = select.y, cursor.y do
+                    editor:remove_line()
+                end
+            else
+                editor:move_to(cursor.x, cursor.y)
+                for line = cursor.y, select.y do
+                    editor:remove_line()
+                end
+            end
+        end
+    end,
+    ["ctrl_k"] = function()
+        editor:open_command_line()
+    end,
+    ["alt_up"] = function()
+        local cursor = editor.cursor
+        local select = editor.selection
+        local single = select.x == cursor.x and select.y == cursor.y
+        editor:commit()
+        if single then
+            -- move single line
+            editor:move_line_up()
+            autoindent:fix_indent()
+        else
+            -- move an entire selection
+            if cursor.y > select.y then
+                for line = select.y, cursor.y do
+                    editor:move_to(cursor.x, line)
+                    editor:move_line_up()
+                end
+            else
+                for line = cursor.y, select.y do
+                    editor:move_to(cursor.x, line)
+                    editor:move_line_up()
+                end
+            end
+            editor:move_to(cursor.x, cursor.y - 1)
+            editor:select_to(select.x, select.y - 1)
+        end
+    end,
+    ["alt_down"] = function()
+        local cursor = editor.cursor
+        local select = editor.selection
+        local single = select.x == cursor.x and select.y == cursor.y
+        editor:commit()
+        if single then
+            -- move single line
+            editor:move_line_down()
+            autoindent:fix_indent()
+        else
+            -- move an entire selection
+            if cursor.y > select.y then
+                for line = cursor.y, select.y, -1 do
+                    editor:move_to(cursor.x, line)
+                    editor:move_line_down()
+                end
+            else
+                for line = select.y, cursor.y, -1 do
+                    editor:move_to(cursor.x, line)
+                    editor:move_line_down()
+                end
+            end
+            editor:move_to(cursor.x, cursor.y + 1)
+            editor:select_to(select.x, select.y + 1)
+        end
+    end,
+    ["ctrl_w"] = function()
+        editor:remove_word()
+    end,
+    ["ctrl_f5"] = function()
+        editor:run_file()
+    end,
+    -- Macros
+    ["ctrl_esc"] = function()
+        editor:macro_record_stop()
+        editor:display_info("Macro recorded")
+    end,
+    -- Splits
+    ["ctrl_alt_left"] = function()
+        editor:focus_split_left()
+    end,
+    ["ctrl_alt_right"] = function()
+        editor:focus_split_right()
+    end,
+    ["ctrl_alt_down"] = function()
+        editor:focus_split_down()
+    end,
+    ["ctrl_alt_up"] = function()
+        editor:focus_split_up()
+    end,
+    -- File Tree
+    ["ctrl_space"] = function()
+        editor:toggle_file_tree()
+    end,
+}
+
+-- Define user-defined commands
+commands = {
+    ["test"] = function(arguments)
+        -- Iterate through each argument and string separate them with commas
+        result = ""
+        for arg_no, arg_value in ipairs(arguments) do
+            result = result .. arg_value .. ", "
+        end
+        -- Display the result
+        editor:display_info("test complete, you passed " .. result .. " as arguments")
+    end,
+    ["help"] = function(arguments)
+        help_message.enabled = not help_message.enabled
+    end,
+    ["readonly"] = function(arguments)
+        arg = arguments[1]
+        if arg == "true" then
+            editor:set_read_only(true)
+        elseif arg == "false" then
+            editor:set_read_only(false)
+        end
+    end,
+    ["filetype"] = function(arguments)
+        local file_type_name = table.concat(arguments, " ")
+        editor:set_file_type(file_type_name)
+    end,
+    ["reload"] = function(arguments)
+        editor:reload_config()
+        editor:display_info("Configuration file reloaded")
+    end,
+    ["split"] = function(arguments)
+        local file = arguments[2]
+        local result = false
+        if arguments[1] == "left" then
+            if arguments[2] == "terminal" or arguments[2] == "term" then
+                result = editor:open_terminal_left(table.concat(arguments, " ", 3))
+            else
+                result = editor:open_split_left(file)
+            end
+        elseif arguments[1] == "right" then
+            if arguments[2] == "terminal" or arguments[2] == "term" then
+                result = editor:open_terminal_right(table.concat(arguments, " ", 3))
+            else
+                result = editor:open_split_right(file)
+            end
+        elseif arguments[1] == "up" then
+            if arguments[2] == "terminal" or arguments[2] == "term" then
+                result = editor:open_terminal_up(table.concat(arguments, " ", 3))
+            else
+                result = editor:open_split_up(file)
+            end
+        elseif arguments[1] == "down" then
+            if arguments[2] == "terminal" or arguments[2] == "term" then
+                result = editor:open_terminal_down(table.concat(arguments, " ", 3))
+            else
+                result = editor:open_split_down(file)
+            end
+        elseif arguments[1] == "grow" then
+            result = true
+            local amount = tonumber(arguments[3]) or 0.15
+            editor:grow_split(amount, arguments[2])
+        elseif arguments[1] == "shrink" then
+            result = true
+            local amount = tonumber(arguments[3]) or 0.15
+            editor:shrink_split(amount, arguments[2])
+        elseif arguments[1] == "focus" then
+            result = true
+            if arguments[2] == "up" then
+                editor:focus_split_up()
+            elseif arguments[2] == "down" then
+                editor:focus_split_down()
+            elseif arguments[2] == "left" then
+                editor:focus_split_left()
+            elseif arguments[2] == "right" then
+                editor:focus_split_right()
+            else
+                editor:display_error("Unknown direction for split focus")
+            end
+        else
+            result = true
+            editor:display_error(tostring(arguments[1]) .. " is not a valid split command")
+        end
+        if not result then
+            editor:display_error("Failed to open file, please check your path")
+        end
+    end,
+    ["macro"] = function(arguments)
+        if arguments[1] == "record" then
+            editor:macro_record_start()
+            editor:display_info("Recording macro, press ctrl+esc to stop")
+        elseif arguments[1] == "play" then
+            local reps
+            if arguments[2] == nil then
+                reps = 1
+            else
+                reps = tonumber(arguments[2])
+            end
+            editor:macro_play(reps)
+        else
+            editor:display_error(tostring(arguments[1]) .. " is not a valid macro command")
+        end
+    end,
+}
+
+-- Configure Documents --
+document.tab_width = 4
+document.indentation = "tabs"
+document.undo_period = 10
+document.wrap_cursor = true
+
+-- Configure Colours --
+colors.editor_bg = {41, 41, 61}
+colors.editor_fg = {255, 255, 255}
+colors.line_number_fg = {65, 65, 98}
+colors.line_number_bg = {41, 41, 61}
+
+colors.status_bg = {59, 59, 84}
+colors.status_fg = {35, 240, 144}
+
+colors.highlight = {35, 240, 144}
+
+colors.tab_inactive_fg = {255, 255, 255}
+colors.tab_inactive_bg = {59, 59, 84}
+colors.tab_active_fg = {255, 255, 255}
+colors.tab_active_bg = {41, 41, 61}
+
+colors.split_bg = {41, 41, 61}
+colors.split_fg = {59, 59, 84}
+
+colors.info_fg = {99, 162, 255}
+colors.info_bg = {41, 41, 61}
+colors.warning_fg = {255, 182, 99}
+colors.warning_bg = {41, 41, 61}
+colors.error_fg = {255, 100, 100}
+colors.error_bg = {41, 41, 61}
+
+colors.selection_fg = {255, 255, 255}
+colors.selection_bg = {59, 59, 130}
+
+colors.file_tree_bg = {41, 41, 61}
+colors.file_tree_fg = {255, 255, 255}
+colors.file_tree_selection_fg = {255, 255, 255}
+colors.file_tree_selection_bg = {59, 59, 130}
+
+colors.file_tree_red = {240, 104, 89}
+colors.file_tree_orange = {240, 142, 89}
+colors.file_tree_yellow = {240, 237, 89}
+colors.file_tree_green = {89, 240, 169}
+colors.file_tree_lightblue = {89, 225, 240}
+colors.file_tree_darkblue = {89, 149, 240}
+colors.file_tree_purple = {139, 89, 240}
+colors.file_tree_pink = {215, 89, 240}
+colors.file_tree_brown = {158, 94, 94}
+colors.file_tree_grey = {150, 144, 201}
+
+-- Configure Line Numbers --
+line_numbers.enabled = true
+line_numbers.padding_left = 1
+line_numbers.padding_right = 1
+
+-- Configure Mouse Behaviour --
+terminal.mouse_enabled = true
+terminal.scroll_amount = 4
+
+-- Configure Terminal Behaviour --
+terminal.shell = "bash"
+
+-- Configure File Tree --
+file_tree.width = 30
+file_tree.move_focus_to_file = true
+file_tree.icons = false
+file_tree.language_icons = true
+
+-- Configure Tab Line --
+tab_line.enabled = true
+tab_line.separators = true
+tab_line.format = "  {file_name}{modified}  "
+
+-- Configure Status Line --
+status_line.parts = {
+    "  {file_name}{modified}  │  {file_type}  │", -- The left side of the status line
+    "│  {cursor_y} / {line_count}  {cursor_x}  ",  -- The right side of the status line
+}
+status_line.alignment = "between" -- This will put a space between the parts (left and right sides)
+
+-- Configure Greeting Message --
+greeting_message.enabled = true
+greeting_message.format = [[
+Ox Editor v{version}
+The simple but flexible text editor
+{highlight_start}
+Quick Start Guide:
+
+Ctrl + Q:  Quit        
+Ctrl + N:  New File    
+Ctrl + O:  Open File   
+Ctrl + S:  Save File   
+Alt  + S:  Save File As
+Ctrl + H:  Help Message
+
+Ready?
+Start Typing
+{highlight_end}
+]]
+
+help_message.enabled = false
+help_message.format = [[
+Key Binding Cheat Sheet
+{highlight_start}
+Ctrl + H:   Help Message  
+Ctrl + N:   New           
+Ctrl + O:   Open          
+Ctrl + Q:   Quit          
+Ctrl + S:   Save          
+Alt  + S:   Save as       
+Alt  + A:   Save all      
+Ctrl + Z:   Undo          
+Ctrl + Y:   Redo          
+Ctrl + F:   Find          
+Ctrl + R:   Replace       
+Ctrl + W:   Delete Word   
+Ctrl + D:   Delete Line   
+Ctrl + G:   Go to a line  
+Alt + Up:   Move line up  
+Alt + Down: Move line down
+Ctrl + K:   Command Line  
+Alt + ->:   Next Tab      
+Alt + <-:   Previous Tab  
+{highlight_end}
+]]
+
+-- Configure Syntax Highlighting Colours --
+syntax:set("string", {39, 222, 145}) -- Strings in various programming languages
+syntax:set("comment", {113, 113, 169}) -- Comments in various programming languages
+syntax:set("digit", {40, 198, 232}) -- Digits in various programming languages
+syntax:set("keyword", {134, 76, 232}) -- Keywords in various programming languages
+syntax:set("attribute", {40, 198, 232}) -- Attributes in various programming languages
+syntax:set("character", {40, 198, 232}) -- Characters in various programming languages
+syntax:set("type", {47, 141, 252}) -- Types in various programming languages
+syntax:set("function", {47, 141, 252}) -- Function names in various programming languages
+syntax:set("header", {40, 198, 232}) -- Headers in various programming language
+syntax:set("macro", {223, 52, 249}) -- Macro names in various programming languages
+syntax:set("namespace", {47, 141, 252}) -- Namespaces in various programming languages
+syntax:set("struct", {47, 141, 252}) -- The names of structs, classes, enums in various programming languages
+syntax:set("operator", {113, 113, 169}) -- Operators in various programming languages e.g. +, -, * etc
+syntax:set("boolean", {86, 217, 178}) -- Booleans in various programming langauges e.g. true / false
+syntax:set("table", {47, 141, 252}) -- Tables in various programming languages
+syntax:set("reference", {134, 76, 232}) -- References in various programming languages
+syntax:set("tag", {40, 198, 232}) -- Tags in various markup langauges e.g. HTML <p> tags
+syntax:set("heading", {47, 141, 252}) -- Headings in various markup languages e.g. # in markdown
+syntax:set("link", {223, 52, 249}) -- Links in various markup languages e.g. URLs
+syntax:set("key", {223, 52, 249}) -- Keys in various markup languages
+syntax:set("quote", {113, 113, 169}) -- Quotes in various markup languages e.g. > in markdown
+syntax:set("bold", {40, 198, 232}) -- Bold text in various markup languages e.g. * in markdown
+syntax:set("italic", {40, 198, 232}) -- Italic text in various markup languages e.g. ** in markdown
+syntax:set("block", {40, 198, 232}) -- Code blocks in various markup languages e.g. `````` in markdown
+syntax:set("image", {40, 198, 232}) -- Images in various markup languages e.g. ![]() in markdown
+syntax:set("list", {86, 217, 178}) -- Lists in various markup languages e.g. - in markdown
+syntax:set("insertion", {39, 222, 145}) -- Images in various markup languages e.g. ![]() in markdown
+syntax:set("deletion", {255, 100, 100}) -- Lists in various markup languages e.g. - in markdown
+
+-- Import plugins (must be at the bottom of this file)
+load_plugin("pairs.lua")
+load_plugin("autoindent.lua")
+load_plugin("quickcomment.lua")
