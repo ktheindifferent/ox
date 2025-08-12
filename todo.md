@@ -145,6 +145,12 @@
 - Identified conditional compilation blocks for Windows vs Unix
 - Located path handling inconsistencies
 - Reviewed build system limitations
+- **Created cross-platform PTY abstraction layer** (src/pty_cross.rs)
+- **Fixed path separator consistency in Lua plugins** (updated bootstrap.lua and plugin_manager.lua)
+- **Created cross-platform build configuration** (Makefile.toml and build.ps1)
+- **Added Windows clipboard support** (src/clipboard.rs)
+- **Fixed home directory resolution** (src/dirs.rs)
+- **Updated terminal detection for Windows** (src/terminal.rs)
 
 ## 📝 Notes
 - Priority should be given to items that block basic functionality on Windows

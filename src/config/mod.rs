@@ -1,4 +1,5 @@
 /// For general configuration
+use crate::dirs;
 use crate::editor::{FileType, FileTypes};
 use crate::error::{OxError, Result};
 use mlua::prelude::*;
@@ -234,7 +235,8 @@ impl Config {
 
     /// Read the user-provided config
     pub fn get_user_provided_config(path: &str) -> Option<String> {
-        if let Ok(path) = shellexpand::full(&path) {
+        let path = dirs::expand_tilde(&path).to_string_lossy().to_string();
+        {
             if let Ok(config) = std::fs::read_to_string(path.to_string()) {
                 return Some(config);
             }

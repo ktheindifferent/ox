@@ -2,11 +2,34 @@
 home = os.getenv("HOME") or os.getenv("USERPROFILE")
 path_sep = package.config:sub(1,1)
 
-if path_sep == "\\" then
-    plugin_path = home .. "\\ox"
-else
-    plugin_path = home .. "/.config/ox"
+-- Cross-platform path construction helper
+function build_path(...)
+    local parts = {...}
+    return table.concat(parts, path_sep)
 end
+
+-- Get appropriate config directory based on platform
+function get_config_dir()
+    if path_sep == "\\" then
+        -- Windows: Use %APPDATA% or fallback to home\ox
+        local appdata = os.getenv("APPDATA")
+        if appdata then
+            return build_path(appdata, "ox")
+        else
+            return build_path(home, "ox")
+        end
+    else
+        -- Unix-like: Use XDG_CONFIG_HOME or fallback to ~/.config/ox
+        local xdg_config = os.getenv("XDG_CONFIG_HOME")
+        if xdg_config then
+            return build_path(xdg_config, "ox")
+        else
+            return build_path(home, ".config", "ox")
+        end
+    end
+end
+
+plugin_path = get_config_dir()
 
 function file_exists(file_path)
     local file = io.open(file_path, "r")
@@ -38,10 +61,16 @@ plugin_issues = false
 
 function load_plugin(base)
     path_cross = base
-    path_unix = home .. "/.config/ox/" .. base
-    path_win = home .. "\\ox\\" .. base
+    -- Try plugin_path first (already platform-specific)
+    path_primary = build_path(plugin_path, base)
+    -- Also check legacy paths for backward compatibility
+    path_unix = build_path(home, ".config", "ox", base)
+    path_win = build_path(home, "ox", base)
+    
     if file_exists(path_cross) then
         path = path_cross
+    elseif file_exists(path_primary) then
+        path = path_primary
     elseif file_exists(path_unix) then
         path = path_unix
     elseif file_exists(path_win) then

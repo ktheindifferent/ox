@@ -1,7 +1,9 @@
 /// Utilities for rendering the user interface
+use crate::clipboard::Clipboard;
 use crate::config::{Colors, Terminal as TerminalConfig};
 use crate::editor::MacroMan;
 use crate::error::Result;
+use crate::terminal::TerminalCapabilities;
 use base64::prelude::*;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -273,6 +275,14 @@ impl Terminal {
     /// Put text into the clipboard
     pub fn copy(&mut self, text: &str) -> Result<()> {
         self.last_copy = text.to_string();
+        
+        // Try native clipboard first
+        let mut clipboard = Clipboard::new();
+        if let Ok(()) = clipboard.set_text(text) {
+            return Ok(());
+        }
+        
+        // Fall back to OSC 52 sequence for terminal clipboard
         write!(
             self.stdout,
             "\x1b]52;c;{}\x1b\\",
@@ -284,18 +294,8 @@ impl Terminal {
 
 /// Determines if this terminal supports 256 bit colours
 pub fn supports_true_color() -> bool {
-    // Get the TERM and COLORTERM environment variables
-    let term = env::var("TERM").unwrap_or_default();
-    let colorterm = env::var("COLORTERM").unwrap_or_default();
-    // Check for common true color indicators
-    if term.contains("truecolor") || term.contains("screen") {
-        return true;
-    }
-    // Some terminals use COLORTERM to indicate support for true color
-    if colorterm.contains("truecolor") || colorterm.contains("24bit") {
-        return true;
-    }
-    false
+    let caps = TerminalCapabilities::detect();
+    caps.true_color
 }
 
 /// Converts rgb to the closest xterm equivalent

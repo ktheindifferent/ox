@@ -1,0 +1,347 @@
+# Cross-platform build configuration using cargo-make
+# Install cargo-make: cargo install cargo-make
+
+[env]
+CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
+
+[config]
+default_to_workspace = false
+
+# ========================
+# Platform Detection
+# ========================
+
+[tasks.setup]
+description = "Set up build environment"
+script_runner = "@duckscript"
+script = '''
+os = os_family
+echo Platform detected: ${os}
+
+if eq ${os} "windows"
+    echo Setting up Windows environment...
+elseif eq ${os} "mac"
+    echo Setting up macOS environment...
+else
+    echo Setting up Linux environment...
+end
+'''
+
+# ========================
+# Build Tasks
+# ========================
+
+[tasks.build]
+description = "Build for current platform"
+command = "cargo"
+args = ["build", "--release"]
+dependencies = ["setup"]
+
+[tasks.build-debug]
+description = "Build debug version"
+command = "cargo"
+args = ["build"]
+
+[tasks.build-all]
+description = "Build for all supported platforms"
+dependencies = [
+    "build-linux",
+    "build-windows",
+    "build-macos"
+]
+
+# ========================
+# Platform-specific builds
+# ========================
+
+[tasks.build-linux]
+description = "Build for Linux"
+condition = { platforms = ["linux"] }
+script = '''
+#!/bin/bash
+echo "Building for Linux..."
+cargo build --release
+if command -v strip &> /dev/null; then
+    strip -s target/release/ox
+fi
+cp target/release/ox target/ox-linux
+'''
+
+[tasks.build-windows]
+description = "Build for Windows"
+script_runner = "@shell"
+script = '''
+echo Building for Windows...
+cargo build --release --target x86_64-pc-windows-gnu
+if [ -f target/x86_64-pc-windows-gnu/release/ox.exe ]; then
+    cp target/x86_64-pc-windows-gnu/release/ox.exe target/ox.exe
+fi
+'''
+
+[tasks.build-windows-native]
+description = "Build for Windows (native)"
+condition = { platforms = ["windows"] }
+script_runner = "cmd"
+script = '''
+echo Building for Windows (native)...
+cargo build --release
+copy target\\release\\ox.exe target\\ox.exe
+'''
+
+[tasks.build-macos]
+description = "Build for macOS"
+condition = { platforms = ["mac"] }
+script = '''
+#!/bin/bash
+echo "Building for macOS..."
+cargo build --release
+cp target/release/ox target/ox-macos
+'''
+
+[tasks.build-macos-cross]
+description = "Cross-compile for macOS from Linux"
+condition = { platforms = ["linux"] }
+script = '''
+#!/bin/bash
+echo "Cross-compiling for macOS..."
+if command -v cargo-zigbuild &> /dev/null; then
+    cargo zigbuild --release --target x86_64-apple-darwin
+    cargo zigbuild --release --target aarch64-apple-darwin
+    cp target/x86_64-apple-darwin/release/ox target/ox-macos-x64 2>/dev/null || true
+    cp target/aarch64-apple-darwin/release/ox target/ox-macos-arm64 2>/dev/null || true
+else
+    echo "cargo-zigbuild not found. Install with: cargo install cargo-zigbuild"
+fi
+'''
+
+# ========================
+# Testing
+# ========================
+
+[tasks.test]
+description = "Run tests"
+command = "cargo"
+args = ["test", "--all"]
+
+[tasks.test-coverage]
+description = "Run tests with coverage"
+install_crate = { crate_name = "cargo-tarpaulin", binary = "cargo-tarpaulin", test_arg = "--version" }
+command = "cargo"
+args = ["tarpaulin", "--out", "Html", "--output-dir", "target/coverage"]
+
+# ========================
+# Packaging
+# ========================
+
+[tasks.package]
+description = "Create packages for current platform"
+script_runner = "@duckscript"
+script = '''
+os = os_family
+
+if eq ${os} "windows"
+    cm_run_task package-windows
+elseif eq ${os} "mac"
+    cm_run_task package-macos
+else
+    cm_run_task package-linux
+end
+'''
+
+[tasks.package-linux]
+description = "Create Linux packages (DEB and RPM)"
+dependencies = ["build-linux"]
+script = '''
+#!/bin/bash
+mkdir -p target/pkgs
+
+# Create DEB package
+if command -v cargo-deb &> /dev/null; then
+    cargo deb
+    cp target/debian/*.deb target/pkgs/ 2>/dev/null || true
+else
+    echo "cargo-deb not found. Install with: cargo install cargo-deb"
+fi
+
+# Create RPM package
+if command -v cargo-generate-rpm &> /dev/null; then
+    cargo generate-rpm
+    cp target/generate-rpm/*.rpm target/pkgs/ 2>/dev/null || true
+else
+    echo "cargo-generate-rpm not found. Install with: cargo install cargo-generate-rpm"
+fi
+
+# Create AppImage (optional)
+if command -v linuxdeploy &> /dev/null; then
+    echo "Creating AppImage..."
+    # AppImage creation steps would go here
+fi
+
+echo "Linux packages created in target/pkgs/"
+'''
+
+[tasks.package-windows]
+description = "Create Windows installer"
+condition = { platforms = ["windows"] }
+dependencies = ["build-windows-native"]
+script_runner = "powershell"
+script = '''
+Write-Host "Creating Windows packages..."
+New-Item -ItemType Directory -Force -Path target\pkgs
+
+# Copy executable
+Copy-Item target\release\ox.exe target\pkgs\ox.exe
+
+# Create ZIP archive
+Compress-Archive -Path target\release\ox.exe -DestinationPath target\pkgs\ox-windows.zip -Force
+
+Write-Host "Windows packages created in target\pkgs\"
+'''
+
+[tasks.package-macos]
+description = "Create macOS package"
+condition = { platforms = ["mac"] }
+dependencies = ["build-macos"]
+script = '''
+#!/bin/bash
+echo "Creating macOS package..."
+mkdir -p target/pkgs
+
+# Copy binary
+cp target/release/ox target/pkgs/ox-macos
+
+# Create DMG or ZIP (simplified version)
+cd target/pkgs
+zip ox-macos.zip ox-macos
+cd ../..
+
+echo "macOS package created in target/pkgs/"
+'''
+
+# ========================
+# Installation
+# ========================
+
+[tasks.install]
+description = "Install ox to system"
+script_runner = "@duckscript"
+script = '''
+os = os_family
+
+if eq ${os} "windows"
+    cm_run_task install-windows
+elseif eq ${os} "mac"
+    cm_run_task install-macos
+else
+    cm_run_task install-linux
+end
+'''
+
+[tasks.install-linux]
+description = "Install on Linux"
+condition = { platforms = ["linux"] }
+dependencies = ["build"]
+script = '''
+#!/bin/bash
+echo "Installing ox..."
+sudo cp target/release/ox /usr/local/bin/ox
+sudo chmod +x /usr/local/bin/ox
+echo "ox installed to /usr/local/bin/ox"
+'''
+
+[tasks.install-windows]
+description = "Install on Windows"
+condition = { platforms = ["windows"] }
+dependencies = ["build-windows-native"]
+script_runner = "powershell"
+script = '''
+Write-Host "Installing ox..."
+$installPath = "$env:LOCALAPPDATA\ox"
+New-Item -ItemType Directory -Force -Path $installPath
+Copy-Item target\release\ox.exe $installPath\ox.exe
+
+# Add to PATH if not already there
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$installPath*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$installPath", "User")
+    Write-Host "Added $installPath to PATH"
+}
+
+Write-Host "ox installed to $installPath\ox.exe"
+'''
+
+[tasks.install-macos]
+description = "Install on macOS"
+condition = { platforms = ["mac"] }
+dependencies = ["build"]
+script = '''
+#!/bin/bash
+echo "Installing ox..."
+cp target/release/ox /usr/local/bin/ox
+chmod +x /usr/local/bin/ox
+echo "ox installed to /usr/local/bin/ox"
+'''
+
+# ========================
+# Development
+# ========================
+
+[tasks.dev]
+description = "Run in development mode"
+command = "cargo"
+args = ["run"]
+
+[tasks.clean]
+description = "Clean build artifacts"
+command = "cargo"
+args = ["clean"]
+
+[tasks.format]
+description = "Format code"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.lint]
+description = "Run clippy linter"
+command = "cargo"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+[tasks.check]
+description = "Check code without building"
+command = "cargo"
+args = ["check", "--all"]
+
+# ========================
+# CI/CD Tasks
+# ========================
+
+[tasks.ci]
+description = "Run CI pipeline"
+dependencies = [
+    "format",
+    "lint",
+    "check",
+    "test",
+    "build"
+]
+
+[tasks.release]
+description = "Prepare release"
+dependencies = [
+    "ci",
+    "package"
+]
+
+# ========================
+# Documentation
+# ========================
+
+[tasks.docs]
+description = "Build documentation"
+command = "cargo"
+args = ["doc", "--no-deps", "--open"]
+
+[tasks.docs-all]
+description = "Build documentation with dependencies"
+command = "cargo"
+args = ["doc", "--open"]

@@ -2,6 +2,14 @@
 
 plugin_manager = {}
 
+-- Cross-platform path helpers (if not already defined)
+if not build_path then
+    function build_path(...)
+        local parts = {...}
+        return table.concat(parts, package.config:sub(1,1))
+    end
+end
+
 -- Install a plug-in
 function plugin_manager:install(plugin)
     -- Check if downloaded / in config
@@ -100,7 +108,11 @@ function plugin_manager:status()
     end
     for _, v in ipairs(plugins) do
         count = count + 1
-        list = list .. v:match("^.+[\\/](.+).lua$") .. " "
+        -- Extract filename from path, handling both / and \ separators
+        local filename = v:match("([^/\\]+)%.lua$")
+        if filename then
+            list = list .. filename .. " "
+        end
     end
     editor:display_info(tostring(count) .. " plug-ins installed: " .. list)
 end
@@ -118,9 +130,12 @@ end
 function plugin_manager:plugin_downloaded(plugin)
     local base = plugin .. ".lua"
     local path_cross = base
-    local path_unix = home .. "/.config/ox/" .. base
-    local path_win = home .. "/ox/" .. base
-    local installed = file_exists(path_cross) or file_exists(path_unix) or file_exists(path_win)
+    -- Use plugin_path (already platform-specific)
+    local path_primary = build_path(plugin_path, base)
+    -- Check legacy paths for backward compatibility
+    local path_unix = build_path(home, ".config", "ox", base)
+    local path_win = build_path(home, "ox", base)
+    local installed = file_exists(path_cross) or file_exists(path_primary) or file_exists(path_unix) or file_exists(path_win)
     -- Return true if plug-ins are built in
     local builtin = self:plugin_is_builtin(plugin)
     return installed or builtin
@@ -134,15 +149,15 @@ function plugin_manager:download_plugin(plugin)
     if resp == "404: Not Found" then
         return "Plug-in not found in repository"
     end
-    -- Find the path to download it to
-    local path = plugin_path .. "/" .. plugin .. ".lua"
+    -- Find the path to download it to (using platform-specific separator)
+    local path = build_path(plugin_path, plugin .. ".lua")
     -- Create the plug-in directory if it doesn't already exist
     if not dir_exists(plugin_path) then
         local command
-        if package.config.sub(1,1) == '\\' then
-            command = "mkdir " .. plugin_path
+        if package.config:sub(1,1) == '\\' then
+            command = "mkdir \"" .. plugin_path .. "\""
         else
-            command = "mkdir -p " .. plugin_path
+            command = "mkdir -p \"" .. plugin_path .. "\""
         end
         if shell:run(command) ~= 0 then
             return "Failed to make directory at " .. plugin_path
@@ -160,9 +175,8 @@ end
 
 -- Remove a plug-in from the configuration directory
 function plugin_manager:remove_plugin(plugin)
-    -- Obtain the path
-    local path = package.config:sub(1,1) == '\\' and home .. "/ox" or home .. "/.config/ox"
-    path = path .. "/" .. plugin .. ".lua"
+    -- Obtain the path using platform-specific plugin_path
+    local path = build_path(plugin_path, plugin .. ".lua")
     -- Remove the file
     local success, err = os.remove(path)
     if not success then

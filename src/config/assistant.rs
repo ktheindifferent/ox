@@ -1,6 +1,7 @@
 /// Code for the configuration set-up assistant
 use crate::cli::VERSION;
 use crate::config::{Color, Colors, Indentation, SyntaxHighlighting};
+use crate::dirs;
 use crate::error::Result;
 use crate::{PLUGIN_BOOTSTRAP, PLUGIN_MANAGER, PLUGIN_NETWORKING};
 use crossterm::cursor::MoveTo;
@@ -271,7 +272,10 @@ impl Assistant {
             if !because_no_config {
                 let yellow = Fg(Color::Ansi(220).to_color()?);
                 let reset = Fg(Color::Transparent.to_color()?);
-                println!("{yellow}WARNING{reset}: config file already exists, it will be backed-up to ~/.oxrc-backup if you write");
+                let backup_path = dirs::config_dir()
+                    .map(|mut p| { p.push(".oxrc-backup"); p })
+                    .unwrap_or_else(|| std::path::PathBuf::from("~/.oxrc-backup"));
+                println!("{yellow}WARNING{reset}: config file already exists, it will be backed-up to {} if you write", backup_path.display());
             }
             let contents = result.to_config();
             if Self::confirmation(
@@ -300,8 +304,10 @@ impl Assistant {
         result: &str,
         because_no_config: bool,
     ) -> Result<()> {
-        let config_path = format!("{}/.oxrc", shellexpand::tilde("~"));
-        let backup_path = format!("{}/.oxrc-backup", shellexpand::tilde("~"));
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+        let config_path = config_dir.join(".oxrc");
+        let backup_path = config_dir.join(".oxrc-backup");
         if !because_no_config {
             let _ = std::fs::rename(config_path.clone(), backup_path);
         }

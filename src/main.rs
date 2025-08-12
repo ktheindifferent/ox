@@ -1,12 +1,15 @@
 #![warn(clippy::all, clippy::pedantic)]
 
 mod cli;
+mod clipboard;
 mod config;
+mod dirs;
 mod editor;
 mod error;
 mod events;
 #[cfg(not(target_os = "windows"))]
 mod pty;
+mod terminal;
 mod ui;
 
 use cli::CommandLineInterface;
