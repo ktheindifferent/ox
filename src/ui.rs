@@ -22,7 +22,6 @@ use crossterm::{
 use kaolinite::utils::{width, Size};
 use mlua::AnyUserData;
 use std::collections::HashMap;
-use std::env;
 use std::io::{stdout, Stdout, Write};
 #[cfg(not(target_os = "windows"))]
 use synoptic::Regex;
