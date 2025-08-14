@@ -224,9 +224,9 @@ impl TerminalType {
             Self::WindowsConsole => {
                 // Windows Console has limited mouse support
                 #[cfg(target_os = "windows")]
-                true
+                { true }
                 #[cfg(not(target_os = "windows"))]
-                false
+                { false }
             }
             
             _ => false,

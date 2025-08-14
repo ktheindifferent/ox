@@ -2,7 +2,6 @@ use kaolinite::regex;
 #[cfg(test)]
 use kaolinite::{document::*, event::*, map::*, searching::*, utils::*};
 use std::io::Write;
-use std::ops::{Range, RangeBounds};
 use sugars::hmap;
 
 macro_rules! st {
@@ -935,12 +934,10 @@ fn document_indices() {
 
 #[test]
 fn file_paths() {
-    assert!(get_absolute_path("tests/data/unicode.txt")
-        .unwrap()
-        .starts_with("/home/"));
-    assert!(get_absolute_path("tests/data/unicode.txt")
-        .unwrap()
-        .starts_with("/home/"));
+    let abs_path = get_absolute_path("tests/data/unicode.txt").unwrap();
+    assert!(abs_path.starts_with("/") || abs_path.starts_with("C:\\"));
+    let abs_path2 = get_absolute_path("tests/data/unicode.txt").unwrap();
+    assert!(abs_path2.starts_with("/") || abs_path2.starts_with("C:\\"));
     assert_eq!(
         get_file_name("tests/data/unicode.txt"),
         Some(st!("unicode.txt"))
