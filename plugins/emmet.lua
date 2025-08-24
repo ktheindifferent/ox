@@ -20,7 +20,8 @@ function emmet:expand()
     unexpanded = unexpanded:gsub("^%s+", "")
     unexpanded = unexpanded:gsub("%s+$", "")
     -- Request the expanded equivalent
-    local command = string.format("python %s/oxemmet.py \"%s\"", plugin_path, unexpanded)
+    local script_path = build_path(plugin_path, "oxemmet.py")
+    local command = string.format("python \"%s\" \"%s\"", script_path, unexpanded)
     local expanded = shell:output(command)
     expanded = expanded:gsub("\n$", "")
     -- Keep track of the level of indentation
@@ -104,8 +105,9 @@ print(expansion)
 ]]
 
 -- Write the emmet script if not already there
-if not file_exists(plugin_path .. "/oxemmet.py") then
-    local file = io.open(plugin_path .. "/oxemmet.py", "w")
+local oxemmet_script_path = build_path(plugin_path, "oxemmet.py")
+if not file_exists(oxemmet_script_path) then
+    local file = io.open(oxemmet_script_path, "w")
     file:write(emmet_expand)
     file:close()
 end

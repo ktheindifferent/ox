@@ -38,7 +38,7 @@ function git:refresh_status()
         for line in status_output:gmatch("[^\r\n]+") do
             local staged_status = line:sub(1, 1)
             local unstaged_status = line:sub(2, 2)
-            local file_name = repo_path .. "/" .. line:sub(4)
+            local file_name = build_path(repo_path, line:sub(4))
             local staged
             local modified
             if self.icons then
@@ -179,7 +179,7 @@ commands["git"] = function(args)
         elseif args[1] == "stat" then
             local stats = git:get_stats()
             for _, t in ipairs(stats.files) do
-                if repo_path .. "/" .. t.file == editor.file_path then
+                if build_path(repo_path, t.file) == editor.file_path then
                     editor:display_info(string.format(
                         "%s: %s insertions, %s deletions",
                         t.file, t.insertions, t.deletions
