@@ -242,7 +242,7 @@ impl Editor {
                 // Create a new document if not found
                 self.blank()?;
                 if let Some((files, _)) = self.files.get_atom_mut(self.ptr.clone()) {
-                    let file = files.last_mut().unwrap();
+                    let file = files.last_mut().expect("Files list should not be empty after blank()");
                     file.doc.file_name = Some(file_name);
                     // Work out information for the document
                     let tab_width = config!(self.config, document).tab_width;
@@ -288,12 +288,15 @@ impl Editor {
     pub fn save_as(&mut self) -> Result<()> {
         if self.try_doc().is_some() {
             let file_name = self.prompt("Save as")?;
-            self.try_doc_mut().unwrap().save_as(&file_name)?;
+            let file_name_is_none = self.try_doc().map(|d| d.file_name.is_none()).unwrap_or(false);
+            if let Some(doc_mut) = self.try_doc_mut() {
+                doc_mut.save_as(&file_name)?;
+            }
             // If this file is currently unnamed, give it a name, syntax highlighting and a type
-            if self.try_doc().unwrap().file_name.is_none() {
+            if file_name_is_none {
                 let tab_width = config!(self.config, document).tab_width;
                 if let Some((files, ptr)) = self.files.get_atom_mut(self.ptr.clone()) {
-                    let file = files.get_mut(*ptr).unwrap();
+                    let file = files.get_mut(*ptr).expect("File at pointer index should exist");
                     // Set the file name
                     file.doc.file_name = Some(file_name.clone());
                     // Update the file type
@@ -315,7 +318,9 @@ impl Editor {
                 }
             }
             // Commit events to event manager (for undo / redo)
-            self.try_doc_mut().unwrap().commit();
+            if let Some(doc_mut) = self.try_doc_mut() {
+                doc_mut.commit();
+            }
             // All done
             self.feedback = Feedback::Info(format!("Document saved as {file_name} successfully"));
         }
@@ -345,7 +350,8 @@ impl Editor {
                     "This document isn't saved, press Ctrl + Q to force quit or Esc to cancel";
                 let doc = &fcs[*ptr].doc;
                 if doc.event_mgmt.with_disk(&doc.take_snapshot()) || self.confirm(msg)? {
-                    let (fcs, ptr) = self.files.get_atom_mut(self.ptr.clone()).unwrap();
+                    let (fcs, ptr) = self.files.get_atom_mut(self.ptr.clone())
+                        .expect("Files structure should still exist");
                     fcs.remove(*ptr);
                     self.prev();
                 }
@@ -422,12 +428,16 @@ impl Editor {
 
     /// Returns a document at a certain index
     pub fn get_doc(&mut self, idx: usize) -> &mut Document {
-        &mut self.files.get_atom_mut(self.ptr.clone()).unwrap().0[idx].doc
+        &mut self.files.get_atom_mut(self.ptr.clone())
+            .expect("Files structure should exist")
+            .0[idx].doc
     }
 
     /// Gets the number of documents currently open
     pub fn doc_len(&mut self) -> usize {
-        self.files.get_atom(self.ptr.clone()).unwrap().0.len()
+        self.files.get_atom(self.ptr.clone())
+            .expect("Files structure should exist")
+            .0.len()
     }
 
     /// Load the configuration values
@@ -492,12 +502,18 @@ impl Editor {
             // Terminal behaviour
             #[cfg(not(target_os = "windows"))]
             Some(FileLayout::Terminal(term)) => match (modifiers, code) {
-                (KMod::NONE, KCode::Enter) => term.lock().unwrap().char_input('\n')?,
-                (KMod::SHIFT | KMod::NONE, KCode::Char(ch)) => {
-                    term.lock().unwrap().char_input(ch)?;
+                (KMod::NONE, KCode::Enter) => {
+                    term.lock().expect("Failed to lock terminal").char_input('\n')?
                 }
-                (KMod::NONE, KCode::Backspace) => term.lock().unwrap().char_pop(),
-                (KMod::CONTROL, KCode::Char('l')) => term.lock().unwrap().clear()?,
+                (KMod::SHIFT | KMod::NONE, KCode::Char(ch)) => {
+                    term.lock().expect("Failed to lock terminal").char_input(ch)?;
+                }
+                (KMod::NONE, KCode::Backspace) => {
+                    term.lock().expect("Failed to lock terminal").char_pop()
+                }
+                (KMod::CONTROL, KCode::Char('l')) => {
+                    term.lock().expect("Failed to lock terminal").clear()?
+                }
                 _ => (),
             },
             // File behaviour
@@ -507,7 +523,9 @@ impl Editor {
                 let inactivity = end.duration_since(self.last_active).as_millis() as usize;
                 // Commit if over user-defined period of inactivity
                 if inactivity > config!(self.config, document).undo_period * 1000 {
-                    self.try_doc_mut().unwrap().commit();
+                    if let Some(doc_mut) = self.try_doc_mut() {
+                        doc_mut.commit();
+                    }
                 }
                 // Register this activity
                 self.last_active = Instant::now();
@@ -546,7 +564,9 @@ impl Editor {
                 text.to_string()
             };
             // Save state before paste
-            self.try_doc_mut().unwrap().commit();
+            if let Some(doc_mut) = self.try_doc_mut() {
+                doc_mut.commit();
+            }
             // Apply paste
             self.pasting = true;
             for ch in text.chars() {
@@ -554,7 +574,9 @@ impl Editor {
             }
             self.pasting = false;
             // Save state after paste
-            self.try_doc_mut().unwrap().commit();
+            if let Some(doc_mut) = self.try_doc_mut() {
+                doc_mut.commit();
+            }
         }
         Ok(())
     }
