@@ -181,10 +181,11 @@ pub fn handle_multiple_cursors(
     }
     ged!(mut &editor).macro_man.playing = false;
     // Restore back to the state of the document beforehand
-    // TODO: calculate char_ptr and old_cursor too
+    // Calculate the character pointer based on the cursor location
     let char_ptr = ged!(&editor).try_doc()
         .map(|d| d.character_idx(&cursor.loc))
         .unwrap_or(0);
+    // Update all cursor state atomically
     if let Some(doc_mut) = ged!(mut &editor).try_doc_mut() {
         doc_mut.cursor = cursor;
         doc_mut.char_ptr = char_ptr;

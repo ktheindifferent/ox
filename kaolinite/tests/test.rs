@@ -439,6 +439,136 @@ fn document_undo_redo() {
     assert!(doc.event_mgmt.with_disk(&doc.take_snapshot()));
 }
 
+
+#[test]
+fn cursor_state_after_undo_redo() {
+    // Create a simple document with known content
+    let mut doc = Document::new(Size::is(100, 10));
+    doc.insert_line(0, st!("hello world")).unwrap();
+    doc.load_to(100);
+    
+    // Move cursor to position 5 (after "hello")
+    doc.move_to(&Loc::at(5, 0));
+    let initial_cursor = doc.cursor.loc;
+    let initial_char_ptr = doc.char_ptr;
+    let initial_old_cursor = doc.old_cursor;
+    
+    // Take initial snapshot for undo history (with cursor at position 5)
+    doc.commit();
+    
+    // Make an edit at current cursor position
+    let cursor_loc = doc.char_loc();
+    doc.insert(&cursor_loc, &st!(" test")).unwrap();
+    
+    // Cursor should have moved after insertion (5 chars including space)
+    let post_insert_cursor = doc.cursor.loc;
+    let post_insert_char_ptr = doc.char_ptr;
+    let post_insert_old_cursor = doc.old_cursor;
+    assert_eq!(post_insert_cursor.x, initial_cursor.x + 5);
+    assert_eq!(post_insert_cursor.y, initial_cursor.y);
+    assert_eq!(post_insert_char_ptr, initial_char_ptr + 5);
+    assert_eq!(post_insert_old_cursor, initial_cursor.x + 5);
+    
+    // Commit the change
+    doc.commit();
+    
+    // Undo the edit
+    doc.undo().unwrap();
+    
+    // After undo, text should be restored but cursor stays at the edit position
+    // This is standard editor behavior - cursor doesn't jump around on undo
+    assert_eq!(doc.line(0).unwrap(), st!("hello world"));
+    // The cursor position after undo is at the position where the edit occurred
+    assert_eq!(doc.cursor.loc.x, initial_cursor.x);
+    assert_eq!(doc.cursor.loc.y, initial_cursor.y);
+    assert_eq!(doc.char_ptr, initial_char_ptr);
+    assert_eq!(doc.old_cursor, initial_cursor.x);
+    
+    // Redo the edit
+    doc.redo().unwrap();
+    
+    // After redo, both text and cursor should be restored to post-insertion state
+    assert_eq!(doc.line(0).unwrap(), st!("hello test world"));
+    assert_eq!(doc.cursor.loc, post_insert_cursor);
+    assert_eq!(doc.char_ptr, post_insert_char_ptr);
+    assert_eq!(doc.old_cursor, post_insert_old_cursor);
+}
+
+#[test]
+fn cursor_state_with_unicode() {
+    // Create a document with Unicode
+    let mut doc = Document::new(Size::is(100, 10));
+    doc.insert_line(0, st!("你好world")).unwrap();
+    doc.load_to(100);
+    
+    // Test with Unicode characters
+    // "你好world" - each Unicode char takes 2 display width
+    doc.move_to(&Loc::at(4, 0)); // Position after "你好" (2 chars * 2 width = 4 display)
+    let unicode_cursor = doc.cursor.loc;
+    let unicode_char_ptr = doc.char_ptr;
+    let unicode_old_cursor = doc.old_cursor;
+    
+    // Save state with cursor at this position
+    doc.commit();
+    
+    // Insert at character position
+    let cursor_loc = doc.char_loc();
+    doc.insert(&cursor_loc, &st!("测试")).unwrap();
+    
+    // After inserting 2 Unicode chars (each 2 display width)
+    let post_unicode_cursor = doc.cursor.loc;
+    let post_unicode_char_ptr = doc.char_ptr;
+    assert_eq!(post_unicode_cursor.x, unicode_cursor.x + 4); // 2 chars * 2 width each
+    assert_eq!(post_unicode_char_ptr, unicode_char_ptr + 2); // Character count, not display width
+    
+    doc.commit();
+    doc.undo().unwrap();
+    
+    // After undo, cursor should be at the edit position
+    assert_eq!(doc.cursor.loc, unicode_cursor);
+    assert_eq!(doc.char_ptr, unicode_char_ptr);
+    assert_eq!(doc.old_cursor, unicode_cursor.x);
+}
+
+#[test]
+fn cursor_state_with_tabs() {
+    // Create a document with tabs
+    let mut doc = Document::new(Size::is(100, 10));
+    doc.insert_line(0, st!("\thello")).unwrap();
+    doc.load_to(100);
+    
+    // Test with tabs
+    doc.move_to(&Loc::at(0, 0)); // Start of line with tab
+    doc.move_right(); // Move past the tab
+    
+    let tab_cursor = doc.cursor.loc;
+    let tab_char_ptr = doc.char_ptr;
+    let tab_old_cursor = doc.old_cursor;
+    
+    // Save state with cursor after the tab
+    doc.commit();
+    
+    assert_eq!(doc.cursor.loc.x, doc.tab_width); // Tab width is typically 4
+    assert_eq!(doc.char_ptr, 1); // Only one character (the tab)
+    
+    let cursor_loc = doc.char_loc();
+    doc.insert(&cursor_loc, &st!("x")).unwrap();
+    
+    // After insertion
+    let post_tab_cursor = doc.cursor.loc;
+    let post_tab_char_ptr = doc.char_ptr;
+    assert_eq!(post_tab_cursor.x, tab_cursor.x + 1);
+    assert_eq!(post_tab_char_ptr, tab_char_ptr + 1);
+    
+    doc.commit();
+    doc.undo().unwrap();
+    
+    // After undo, cursor should be at the edit position
+    assert_eq!(doc.cursor.loc, tab_cursor);
+    assert_eq!(doc.char_ptr, tab_char_ptr);
+    assert_eq!(doc.old_cursor, tab_cursor.x);
+}
+
 #[test]
 fn document_moving() {
     let mut doc = Document::open(Size::is(10, 10), "tests/data/big.txt").unwrap();
