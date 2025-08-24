@@ -53,44 +53,49 @@ pub const PLUGIN_MANAGER: &str = include_str!("../plugin/plugin_manager.lua");
 #[macro_export]
 macro_rules! config {
     ($cfg:expr, document) => {
-        $cfg.document.borrow::<$crate::config::Document>().unwrap()
+        $cfg.document.borrow::<$crate::config::Document>()
+            .expect("Failed to borrow document config")
     };
     ($cfg:expr, colors) => {
-        $cfg.colors.borrow::<$crate::config::Colors>().unwrap()
+        $cfg.colors.borrow::<$crate::config::Colors>()
+            .expect("Failed to borrow colors config")
     };
     ($cfg:expr, syntax) => {
         $cfg.syntax_highlighting
             .borrow::<$crate::config::SyntaxHighlighting>()
-            .unwrap()
+            .expect("Failed to borrow syntax highlighting config")
     };
     ($cfg:expr, line_numbers) => {
         $cfg.line_numbers
             .borrow::<$crate::config::LineNumbers>()
-            .unwrap()
+            .expect("Failed to borrow line numbers config")
     };
     ($cfg:expr, status_line) => {
         $cfg.status_line
             .borrow::<$crate::config::StatusLine>()
-            .unwrap()
+            .expect("Failed to borrow status line config")
     };
     ($cfg:expr, tab_line) => {
-        $cfg.tab_line.borrow::<$crate::config::TabLine>().unwrap()
+        $cfg.tab_line.borrow::<$crate::config::TabLine>()
+            .expect("Failed to borrow tab line config")
     };
     ($cfg:expr, greeting_message) => {
         $cfg.greeting_message
             .borrow::<$crate::config::GreetingMessage>()
-            .unwrap()
+            .expect("Failed to borrow greeting message config")
     };
     ($cfg:expr, help_message) => {
         $cfg.help_message
             .borrow::<$crate::config::HelpMessage>()
-            .unwrap()
+            .expect("Failed to borrow help message config")
     };
     ($cfg:expr, file_tree) => {
-        $cfg.file_tree.borrow::<$crate::config::FileTree>().unwrap()
+        $cfg.file_tree.borrow::<$crate::config::FileTree>()
+            .expect("Failed to borrow file tree config")
     };
     ($cfg:expr, terminal) => {
-        $cfg.terminal.borrow::<$crate::config::Terminal>().unwrap()
+        $cfg.terminal.borrow::<$crate::config::Terminal>()
+            .expect("Failed to borrow terminal config")
     };
 }
 
@@ -129,7 +134,9 @@ impl Config {
         let task_manager = Arc::new(Mutex::new(TaskManager::default()));
         let task_manager_clone = Arc::clone(&task_manager);
         std::thread::spawn(move || loop {
-            task_manager_clone.lock().unwrap().cycle();
+            if let Ok(mut tm) = task_manager_clone.lock() {
+                tm.cycle();
+            }
             std::thread::sleep(std::time::Duration::from_secs(1));
         });
 
@@ -151,7 +158,9 @@ impl Config {
         let get_task_list = lua.create_function(move |_, ()| {
             Ok(format!(
                 "{:?}",
-                task_manager_clone.lock().unwrap().execution_list()
+                task_manager_clone.lock()
+                    .expect("Failed to lock task manager")
+                    .execution_list()
             ))
         })?;
         lua.globals().set("get_task_list", get_task_list)?;
@@ -162,7 +171,7 @@ impl Config {
             let (delay, target) = args;
             task_manager_clone
                 .lock()
-                .unwrap()
+                .expect("Failed to lock task manager")
                 .attach(delay, target, false);
             Ok(())
         })?;
@@ -174,7 +183,7 @@ impl Config {
             let (delay, target) = args;
             task_manager_clone
                 .lock()
-                .unwrap()
+                .expect("Failed to lock task manager")
                 .attach(delay, target, true);
             Ok(())
         })?;
@@ -251,7 +260,7 @@ impl Config {
             let plugins: Vec<String> = lua
                 .globals()
                 .get::<LuaTable>("builtins")
-                .unwrap()
+                .expect("Failed to get builtins table")
                 .sequence_values()
                 .filter_map(std::result::Result::ok)
                 .collect();
@@ -269,7 +278,7 @@ impl Config {
             // User hasn't provided configuration file, check for local copy
             !lua.globals()
                 .get::<LuaTable>("plugins")
-                .unwrap()
+                .expect("Failed to get plugins table")
                 .sequence_values()
                 .filter_map(std::result::Result::ok)
                 .any(|p: String| p.ends_with(name))
