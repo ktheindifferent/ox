@@ -30,6 +30,7 @@ use mlua::{AnyUserData, FromLua, Lua, Value};
 use std::io::ErrorKind;
 use std::result::Result as RResult;
 use ui::{fatal_error, Feedback};
+use std::process;
 
 /// Get editor helper macro
 #[macro_export]
@@ -42,10 +43,31 @@ macro_rules! ged {
     };
 }
 
+/// Error exit codes for different failure scenarios
+const EXIT_CONFIG_ERROR: i32 = 1;
+const EXIT_RUNTIME_ERROR: i32 = 2;
+const EXIT_STARTUP_ERROR: i32 = 3;
+
+/// Report an error to stderr and exit with appropriate code
+fn report_error_and_exit(context: &str, error: impl std::fmt::Debug, exit_code: i32) -> ! {
+    eprintln!("Error: {}", context);
+    if std::env::var("OX_DEBUG").is_ok() {
+        eprintln!("Debug details: {:?}", error);
+    } else {
+        eprintln!("Run with OX_DEBUG=1 for more details");
+    }
+    process::exit(exit_code);
+}
+
 /// Entry point - grabs command line arguments and runs the editor
 fn main() {
     // Interact with user to find out what they want to do
     let cli = CommandLineInterface::new();
+
+    // Set debug environment variable if debug flag is present
+    if cli.flags.debug {
+        std::env::set_var("OX_DEBUG", "1");
+    }
 
     // Handle help and version options
     cli.basic_options();
@@ -54,14 +76,22 @@ fn main() {
     let no_config = Config::get_user_provided_config(&cli.config_path).is_none();
     if no_config || cli.flags.config_assist {
         if let Err(err) = Assistant::run(no_config) {
-            panic!("{err:?}");
+            report_error_and_exit(
+                "Configuration assistant failed to run",
+                err,
+                EXIT_CONFIG_ERROR
+            );
         }
     }
 
     // Run the editor
     let result = run(&cli);
     if let Err(err) = result {
-        panic!("{err:?}");
+        report_error_and_exit(
+            "Editor encountered a runtime error",
+            err,
+            EXIT_RUNTIME_ERROR
+        );
     }
 }
 /// Run the editor
@@ -73,7 +103,19 @@ fn run(cli: &CommandLineInterface) -> Result<()> {
     // Create editor
     let editor = match Editor::new(&lua) {
         Ok(editor) => editor,
-        Err(error) => panic!("Editor failed to start: {error:?}"),
+        Err(error) => {
+            eprintln!("Failed to initialize the editor");
+            eprintln!("This may be due to:");
+            eprintln!("  - Terminal compatibility issues");
+            eprintln!("  - Missing dependencies");
+            eprintln!("  - Corrupted configuration files");
+            if std::env::var("OX_DEBUG").is_ok() {
+                eprintln!("\nDebug details: {:?}", error);
+            } else {
+                eprintln!("\nRun with OX_DEBUG=1 for detailed error information");
+            }
+            process::exit(EXIT_STARTUP_ERROR);
+        }
     };
 
     // Push editor into lua
@@ -407,5 +449,93 @@ fn run_editor_command(editor: &AnyUserData, cmd: &str, lua: &Lua) {
             lua.load(code).exec(),
             &mut ged!(mut &editor).feedback,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_error_exit_codes() {
+        assert_eq!(EXIT_CONFIG_ERROR, 1);
+        assert_eq!(EXIT_RUNTIME_ERROR, 2);
+        assert_eq!(EXIT_STARTUP_ERROR, 3);
+    }
+
+    #[test]
+    fn test_debug_environment_variable() {
+        // Save original state
+        let original = env::var("OX_DEBUG").ok();
+        
+        // Test with debug mode disabled
+        env::remove_var("OX_DEBUG");
+        assert!(env::var("OX_DEBUG").is_err());
+        
+        // Test with debug mode enabled
+        env::set_var("OX_DEBUG", "1");
+        assert_eq!(env::var("OX_DEBUG").unwrap(), "1");
+        
+        // Restore original state
+        match original {
+            Some(val) => env::set_var("OX_DEBUG", val),
+            None => env::remove_var("OX_DEBUG"),
+        }
+    }
+
+    #[test]
+    fn test_handle_lua_error_runtime() {
+        let mut feedback = Feedback::None;
+        let runtime_err = RuntimeError("test error".to_string());
+        
+        handle_lua_error("test", Err(runtime_err), &mut feedback);
+        
+        match feedback {
+            Feedback::Error(msg) => assert!(msg.contains("test error")),
+            _ => panic!("Expected error feedback"),
+        }
+    }
+
+    #[test]
+    fn test_handle_lua_error_syntax() {
+        let mut feedback = Feedback::None;
+        let syntax_err = SyntaxError {
+            message: "line 42: unexpected token".to_string(),
+            incomplete_input: false,
+        };
+        
+        handle_lua_error("configuration", Err(syntax_err), &mut feedback);
+        
+        match feedback {
+            Feedback::Error(msg) => assert!(msg.contains("Syntax Error")),
+            _ => panic!("Expected error feedback"),
+        }
+    }
+
+    #[test]
+    fn test_handle_lua_error_key_not_bound() {
+        let mut feedback = Feedback::None;
+        let runtime_err = RuntimeError("key not bound".to_string());
+        
+        handle_lua_error("ctrl_x", Err(runtime_err), &mut feedback);
+        
+        match feedback {
+            Feedback::Warning(msg) => assert!(msg.contains("not bound")),
+            _ => panic!("Expected warning feedback"),
+        }
+    }
+
+    #[test]
+    fn test_handle_lua_error_command_not_found() {
+        let mut feedback = Feedback::None;
+        let runtime_err = RuntimeError("command not found".to_string());
+        
+        handle_lua_error("invalid_cmd", Err(runtime_err), &mut feedback);
+        
+        match feedback {
+            Feedback::Error(msg) => assert!(msg.contains("not defined")),
+            _ => panic!("Expected error feedback"),
+        }
     }
 }
