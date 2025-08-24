@@ -20,6 +20,7 @@ OPTIONS:
   --filetype [name], -f [name] : Set the file type of files opened
   --stdin                      : Reads file from the stdin
   --config-assist              : Activate the configuration assistant
+  --debug, -d                  : Enable debug output for errors
 
 EXAMPLES:
   ox
@@ -29,7 +30,8 @@ EXAMPLES:
   ox -c config.lua test.txt
   ox -r -c ~/.config/.oxrc -f Lua my_file.lua
   tree | ox -r --stdin
-  ox --config-assist\
+  ox --config-assist
+  ox --debug test.txt         # Enable debug output\
 ";
 
 /// Read from the standard input
@@ -47,6 +49,7 @@ pub struct CommandLineInterfaceFlags {
     pub read_only: bool,
     pub stdin: bool,
     pub config_assist: bool,
+    pub debug: bool,
 }
 
 /// Struct to help with starting ox
@@ -74,6 +77,7 @@ impl CommandLineInterface {
                 read_only: j.contains(["-r", "--readonly"]),
                 stdin: j.contains("--stdin"),
                 config_assist: j.contains("--config-assist"),
+                debug: j.contains(["-d", "--debug"]),
             },
             file_type: j.option_arg::<String, Key>(filetype.clone()),
             config_path: j

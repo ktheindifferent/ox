@@ -49,15 +49,14 @@ pub fn size() -> Result<Size> {
 /// Fatal Error
 pub fn fatal_error(msg: &str) {
     // Prevent upset terminal state
-    terminal::disable_raw_mode().unwrap();
-    execute!(
+    let _ = terminal::disable_raw_mode();
+    let _ = execute!(
         stdout(),
         LeaveAlternateScreen,
         Show,
         DisableMouseCapture,
         DisableBracketedPaste,
-    )
-    .unwrap();
+    );
     // Display the error information
     eprintln!(
         "{}{}[Error]{}{} {msg}",
@@ -179,15 +178,14 @@ impl Terminal {
     /// Set up the terminal so that it is clean and doesn't affect existing terminal text
     pub fn start(&mut self) -> Result<()> {
         std::panic::set_hook(Box::new(|e| {
-            terminal::disable_raw_mode().unwrap();
-            execute!(
+            let _ = terminal::disable_raw_mode();
+            let _ = execute!(
                 stdout(),
                 LeaveAlternateScreen,
                 Show,
                 DisableMouseCapture,
                 DisableBracketedPaste,
-            )
-            .unwrap();
+            );
             eprintln!("{e}");
         }));
         execute!(
@@ -196,7 +194,8 @@ impl Terminal {
             Clear(ClType::All),
             DisableLineWrap,
         )?;
-        let cfg = self.config.borrow::<TerminalConfig>().unwrap();
+        let cfg = self.config.borrow::<TerminalConfig>()
+            .expect("Failed to borrow terminal config");
         if cfg.mouse_enabled {
             execute!(self.stdout, EnableMouseCapture)?;
         }
@@ -220,7 +219,8 @@ impl Terminal {
         if cfg!(not(target_os = "windows")) {
             execute!(self.stdout, DisableBracketedPaste,)?;
         }
-        let cfg = self.config.borrow::<TerminalConfig>().unwrap();
+        let cfg = self.config.borrow::<TerminalConfig>()
+            .expect("Failed to borrow terminal config");
         if cfg.mouse_enabled {
             execute!(self.stdout, DisableMouseCapture)?;
         }
@@ -325,15 +325,25 @@ pub fn get_xterm_lookup() -> HashMap<u8, (u8, u8, u8)> {
     let mut result = HashMap::default();
     for line in XTERMLOOKUP.split('|') {
         let mut parts = line.split(':');
-        let (id, mut rgb_str) = (
-            parts.next().unwrap().parse::<u8>().unwrap(),
-            parts.next().unwrap().split(','),
-        );
-        let (r, g, b) = (
-            rgb_str.next().unwrap().parse::<u8>().unwrap(),
-            rgb_str.next().unwrap().parse::<u8>().unwrap(),
-            rgb_str.next().unwrap().parse::<u8>().unwrap(),
-        );
+        let id_str = parts.next().expect("XTERM lookup format error: missing ID");
+        let rgb_str = parts.next().expect("XTERM lookup format error: missing RGB");
+        
+        let id = id_str.parse::<u8>().expect("XTERM lookup: invalid ID format");
+        let mut rgb_parts = rgb_str.split(',');
+        
+        let r = rgb_parts.next()
+            .expect("XTERM lookup: missing R value")
+            .parse::<u8>()
+            .expect("XTERM lookup: invalid R value");
+        let g = rgb_parts.next()
+            .expect("XTERM lookup: missing G value")
+            .parse::<u8>()
+            .expect("XTERM lookup: invalid G value");
+        let b = rgb_parts.next()
+            .expect("XTERM lookup: missing B value")
+            .parse::<u8>()
+            .expect("XTERM lookup: invalid B value");
+        
         result.insert(id, (r, g, b));
     }
     result
@@ -362,9 +372,9 @@ fn global() -> String {
 /// Remove ANSI codes from a string
 pub fn remove_ansi_codes(input: &str) -> String {
     // Define a regular expression to match ANSI escape codes and other control sequences
-    let re = Regex::new(&global()).unwrap();
-    let weird_newline = Regex::new(r"⏎\s*⏎\s?").unwrap();
-    let long_spaces = Regex::new(r"%(?:\x1b\[1m)?\s{5,}").unwrap();
+    let re = Regex::new(&global()).expect("Failed to compile ANSI regex");
+    let weird_newline = Regex::new(r"⏎\s*⏎\s?").expect("Failed to compile newline regex");
+    let long_spaces = Regex::new(r"%(?:\x1b\[1m)?\s{5,}").expect("Failed to compile spaces regex");
     // Replace all matches with an empty string
     let result = re.replace_all(input, "").to_string();
     // Replace weird new line stuff
@@ -378,14 +388,14 @@ pub fn remove_ansi_codes(input: &str) -> String {
 #[cfg(not(target_os = "windows"))]
 /// Remove all ANSI codes outside of color and attribute codes
 pub fn strip_escape_codes(input: &str) -> String {
-    let re = Regex::new(&global()).unwrap();
-    let display = Regex::new(DISPLAY).unwrap();
-    let weird_newline = Regex::new(r"⏎\s*⏎\s?").unwrap();
-    let long_spaces = Regex::new(r"%(?:\x1b\[1m)?\s{5,}").unwrap();
+    let re = Regex::new(&global()).expect("Failed to compile ANSI regex");
+    let display = Regex::new(DISPLAY).expect("Failed to compile display regex");
+    let weird_newline = Regex::new(r"⏎\s*⏎\s?").expect("Failed to compile newline regex");
+    let long_spaces = Regex::new(r"%(?:\x1b\[1m)?\s{5,}").expect("Failed to compile spaces regex");
     // Replace escape sequences, keeping those for attributes and colors
     let result = re
         .replace_all(input, |caps: &regex::Captures| {
-            let code = caps.get(0).unwrap().as_str();
+            let code = caps.get(0).expect("Regex capture group 0 should exist").as_str();
             if display.is_match(code) {
                 // Return the escape code unchanged
                 code.to_string()
@@ -408,11 +418,11 @@ pub fn strip_escape_codes(input: &str) -> String {
 /// Replace reset colour ANSI codes with a custom background color.
 pub fn replace_reset(input: &str, custom_bg: &str, custom_fg: &str) -> String {
     // Replace total reset with appropriate codes
-    let total_reset_regex = Regex::new(r"\x1b\[0m").unwrap();
+    let total_reset_regex = Regex::new(r"\x1b\[0m").expect("Failed to compile total reset regex");
     // Define the regex to match reset background ANSI codes
-    let reset_bg_regex = Regex::new(r"\x1b\[49m").unwrap();
+    let reset_bg_regex = Regex::new(r"\x1b\[49m").expect("Failed to compile reset bg regex");
     // Define the regex to match reset foreground ANSI codes
-    let reset_fg_regex = Regex::new(r"\x1b\[39m").unwrap();
+    let reset_fg_regex = Regex::new(r"\x1b\[39m").expect("Failed to compile reset fg regex");
     // Replace reset background with the custom background color
     let attr_full_reset =
         "\u{1b}[22m\u{1b}[23m\u{1b}[24m\u{1b}[25m\u{1b}[27m\u{1b}[28m\u{1b}[29m".to_string();

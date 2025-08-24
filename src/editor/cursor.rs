@@ -132,8 +132,10 @@ pub fn handle_multiple_cursors(
     }
     let mut original_loc = *original_loc;
     // Cache the state of the document
-    let mut cursor = ged!(&editor).try_doc().unwrap().cursor;
-    let mut secondary_cursors = ged!(&editor).try_doc().unwrap().secondary_cursors.clone();
+    let editor_ref = ged!(&editor);
+    let doc = editor_ref.try_doc().expect("Document should exist after check");
+    let mut cursor = doc.cursor;
+    let mut secondary_cursors = doc.secondary_cursors.clone();
     ged!(mut &editor).macro_man.playing = true;
     // Prevent interference
     adjust_other_cursors(
@@ -148,15 +150,18 @@ pub fn handle_multiple_cursors(
     while ptr < secondary_cursors.len() {
         // Move to the secondary cursor position
         let sec_cursor = secondary_cursors[ptr];
-        ged!(mut &editor)
-            .try_doc_mut()
-            .unwrap()
-            .move_to(&sec_cursor);
+        if let Some(doc_mut) = ged!(mut &editor).try_doc_mut() {
+            doc_mut.move_to(&sec_cursor);
+        }
         // Replay the event
-        let old_loc = ged!(&editor).try_doc().unwrap().char_loc();
+        let old_loc = ged!(&editor).try_doc()
+            .map(|d| d.char_loc())
+            .unwrap_or_default();
         handle_event(editor, event, lua)?;
         // Prevent any interference
-        let char_loc = ged!(&editor).try_doc().unwrap().char_loc();
+        let char_loc = ged!(&editor).try_doc()
+            .map(|d| d.char_loc())
+            .unwrap_or_default();
         cursor.loc = adjust_other_cursors(
             &mut secondary_cursors,
             &old_loc,
@@ -165,22 +170,28 @@ pub fn handle_multiple_cursors(
             &mut cursor.loc,
         );
         // Update the secondary cursor
-        *secondary_cursors.get_mut(ptr).unwrap() = char_loc;
+        if let Some(cursor_ref) = secondary_cursors.get_mut(ptr) {
+            *cursor_ref = char_loc;
+        }
         // Move to the next secondary cursor
         ptr += 1;
     }
-    ged!(mut &editor).try_doc_mut().unwrap().secondary_cursors = secondary_cursors;
+    if let Some(doc_mut) = ged!(mut &editor).try_doc_mut() {
+        doc_mut.secondary_cursors = secondary_cursors;
+    }
     ged!(mut &editor).macro_man.playing = false;
     // Restore back to the state of the document beforehand
-    // First set the cursor position
-    ged!(mut &editor).try_doc_mut().unwrap().cursor = cursor;
-    // Calculate and set the character pointer based on the cursor location
-    let char_ptr = ged!(&editor).try_doc().unwrap().character_idx(&cursor.loc);
-    ged!(mut &editor).try_doc_mut().unwrap().char_ptr = char_ptr;
-    // Store the current x position for vertical navigation (up/down movements)
-    ged!(mut &editor).try_doc_mut().unwrap().old_cursor = cursor.loc.x;
-    // Clear any selection
-    ged!(mut &editor).try_doc_mut().unwrap().cancel_selection();
+    // Calculate the character pointer based on the cursor location
+    let char_ptr = ged!(&editor).try_doc()
+        .map(|d| d.character_idx(&cursor.loc))
+        .unwrap_or(0);
+    // Update all cursor state atomically
+    if let Some(doc_mut) = ged!(mut &editor).try_doc_mut() {
+        doc_mut.cursor = cursor;
+        doc_mut.char_ptr = char_ptr;
+        doc_mut.old_cursor = cursor.loc.x;
+        doc_mut.cancel_selection();
+    }
     Ok(())
 }
 
@@ -241,7 +252,7 @@ fn adjust_other_cursors(
         }
         _ => (),
     }
-    cursors.pop().unwrap()
+    cursors.pop().expect("Cursors vector should contain the primary cursor that was just pushed")
 }
 
 // Determine whether an event should be acted on by the multi cursor

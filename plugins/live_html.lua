@@ -21,7 +21,8 @@ end
 function live_html:start()
     -- Start up flask server
     live_html.entry_point = editor.file_path
-    local command = string.format("python %s/livehtml.py '%s'", plugin_path, editor.file_path)
+    local script_path = build_path(plugin_path, "livehtml.py")
+    local command = string.format("python \"%s\" '%s'", script_path, editor.file_path)
     self.pid = shell:spawn(command)
     -- Notify user of location
     editor:display_info("Running server on http://localhost:5000")
@@ -224,8 +225,9 @@ if __name__ == "__main__":
 ]]
 
 -- Write the livehtml script if not already there
-if not file_exists(plugin_path .. "/livehtml.py") then
-    local file = io.open(plugin_path .. "/livehtml.py", "w")
+local livehtml_script_path = build_path(plugin_path, "livehtml.py")
+if not file_exists(livehtml_script_path) then
+    local file = io.open(livehtml_script_path, "w")
     file:write(live_html_start)
     file:close()    
 end
