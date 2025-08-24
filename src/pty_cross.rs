@@ -1,13 +1,14 @@
 //! Cross-platform PTY abstraction layer
 
 use mlua::prelude::*;
-use std::io::{Read, Result, Write};
+use std::io::Result;
 use std::sync::{Arc, Mutex};
 
-#[cfg(not(target_os = "windows"))]
-mod unix_impl;
-#[cfg(target_os = "windows")]
-mod windows_impl;
+#[cfg(test)]
+#[path = "pty_tests.rs"]
+mod tests;
+
+// Platform-specific implementations are defined inline below
 
 #[cfg(not(target_os = "windows"))]
 use unix_impl as platform;
@@ -43,12 +44,37 @@ impl Shell {
         }
         #[cfg(target_os = "windows")]
         {
+            // Check COMSPEC environment variable first (standard Windows shell variable)
+            if let Ok(comspec) = std::env::var("COMSPEC") {
+                if comspec.to_lowercase().contains("cmd.exe") {
+                    return Self::Cmd;
+                }
+            }
+            
+            // Check if PowerShell is the default shell
+            // Check for PowerShell in PATH or use it as default on modern Windows
+            if let Ok(path) = std::env::var("PATH") {
+                if path.contains("PowerShell") || path.contains("pwsh") {
+                    return Self::PowerShell;
+                }
+            }
+            
+            // Default to PowerShell on modern Windows (Windows 10+)
+            // as it's more feature-rich than cmd.exe
             Self::PowerShell
         }
     }
 
     pub fn manual_input_echo(self) -> bool {
-        matches!(self, Self::Bash | Self::Dash)
+        #[cfg(not(target_os = "windows"))]
+        {
+            matches!(self, Self::Bash | Self::Dash)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Windows shells handle echo differently through ConPTY
+            false
+        }
     }
 
     pub fn inserts_extra_newline(self) -> bool {
@@ -58,6 +84,7 @@ impl Shell {
         }
         #[cfg(target_os = "windows")]
         {
+            // Windows ConPTY handles newlines differently
             false
         }
     }
@@ -196,16 +223,18 @@ impl Pty {
     }
 
     pub fn catch_up(&mut self) -> Result<bool> {
-        let output = self.inner.try_read_output()?;
-        if !output.is_empty() {
-            let mut processed = output;
-            if self.shell.inserts_extra_newline() {
-                processed = processed.replace("\u{1b}[?2004l\r\r\n", "");
+        match self.inner.try_read_output() {
+            Ok(output) if !output.is_empty() => {
+                let mut processed = output;
+                if self.shell.inserts_extra_newline() {
+                    processed = processed.replace("\u{1b}[?2004l\r\r\n", "");
+                }
+                self.output += &processed;
+                Ok(true)
             }
-            self.output += &processed;
-            Ok(true)
-        } else {
-            Ok(false)
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) => Err(e),
         }
     }
 }
@@ -274,12 +303,17 @@ mod unix_impl {
                 .register(&mut source, Token(0), Interest::READABLE)?;
             
             match poll.poll(&mut events, Some(Duration::from_millis(100))) {
-                Ok(()) => {
+                Ok(()) if !events.is_empty() => {
                     let mut reader = BufReader::new(stream);
                     let mut buf = [0u8; 10240];
-                    let bytes_read = reader.read(&mut buf)?;
-                    Ok(String::from_utf8_lossy(&buf[..bytes_read]).to_string())
+                    match reader.read(&mut buf) {
+                        Ok(bytes_read) => Ok(String::from_utf8_lossy(&buf[..bytes_read]).to_string()),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(String::new()),
+                        Err(e) => Err(e),
+                    }
                 }
+                Ok(_) => Ok(String::new()), // No events, return empty string
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(String::new()),
                 Err(e) => Err(e),
             }
         }
@@ -297,36 +331,211 @@ mod unix_impl {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::Shell;
-    use std::io::{Result, Error, ErrorKind};
+    use portable_pty::{native_pty_system, Child, CommandBuilder, PtyPair, PtySize, PtySystem};
+    use std::io::{Error, ErrorKind, Read, Result, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     
     pub struct PtyImpl {
         shell: Shell,
-        // TODO: Implement using Windows ConPTY API or portable-pty crate
+        pty_pair: Box<PtyPair>,
+        reader: Arc<Mutex<Box<dyn Read + Send>>>,
+        writer: Box<dyn Write + Send>,
+        child: Box<dyn Child + Send + Sync>,
     }
 
     impl PtyImpl {
         pub fn new(shell: Shell) -> Result<Self> {
-            // For now, return an error indicating PTY is not yet supported on Windows
-            Err(Error::new(
-                ErrorKind::Unsupported,
-                "PTY support on Windows is not yet implemented. Terminal features are currently unavailable."
-            ))
+            // Get the native PTY system (ConPTY on Windows)
+            let pty_system = native_pty_system();
+            
+            // Create a PTY with standard terminal dimensions
+            let pty_pair = pty_system
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to open PTY: {}", e)))?;
+            
+            // Build the command for the shell
+            let mut cmd = CommandBuilder::new(shell.command());
+            
+            // Add shell-specific arguments
+            match shell {
+                Shell::PowerShell => {
+                    cmd.arg("-NoLogo");
+                    cmd.arg("-NoExit");
+                    cmd.arg("-Command");
+                    cmd.arg("-");
+                }
+                Shell::Cmd => {
+                    // cmd.exe doesn't need special arguments for PTY mode
+                }
+                _ => {}
+            }
+            
+            // Set environment variables for better terminal compatibility
+            cmd.env("TERM", "xterm-256color");
+            
+            // Spawn the shell process
+            let child = pty_pair
+                .slave
+                .spawn_command(cmd)
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to spawn shell: {}", e)))?;
+            
+            // Get reader and writer from the master side
+            let reader = pty_pair
+                .master
+                .try_clone_reader()
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to clone reader: {}", e)))?;
+            
+            let writer = pty_pair
+                .master
+                .take_writer()
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to get writer: {}", e)))?;
+            
+            Ok(Self {
+                shell,
+                pty_pair: Box::new(pty_pair),
+                reader: Arc::new(Mutex::new(reader)),
+                writer,
+                child: Box::new(child),
+            })
         }
 
         pub fn set_echo(&mut self, _echo: bool) -> Result<()> {
-            Err(Error::new(ErrorKind::Unsupported, "Not implemented on Windows"))
+            // Echo control is handled differently on Windows ConPTY
+            // The ConPTY API doesn't directly expose echo control like Unix PTYs
+            // This is typically controlled by the shell itself
+            Ok(())
         }
 
-        pub fn write_input(&mut self, _input: &str) -> Result<()> {
-            Err(Error::new(ErrorKind::Unsupported, "Not implemented on Windows"))
+        pub fn write_input(&mut self, input: &str) -> Result<()> {
+            self.writer.write_all(input.as_bytes())?;
+            self.writer.flush()?;
+            Ok(())
         }
 
         pub fn read_output(&mut self) -> Result<String> {
-            Err(Error::new(ErrorKind::Unsupported, "Not implemented on Windows"))
+            // Check if the process is still alive
+            if !self.is_alive() {
+                return Err(Error::new(ErrorKind::BrokenPipe, "PTY process has terminated"));
+            }
+            
+            let mut reader = self.reader.lock().unwrap();
+            let mut buf = vec![0u8; 10240];
+            
+            // Set a timeout for reading
+            let timeout = Duration::from_millis(500);
+            let start = std::time::Instant::now();
+            
+            let mut total_read = 0;
+            while start.elapsed() < timeout {
+                match reader.read(&mut buf[total_read..]) {
+                    Ok(0) => {
+                        // Check if process died
+                        if !self.is_alive() && total_read == 0 {
+                            return Err(Error::new(ErrorKind::BrokenPipe, "PTY process terminated"));
+                        }
+                        break;
+                    }
+                    Ok(n) => {
+                        total_read += n;
+                        if total_read >= buf.len() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {
+                        // Retry on interrupted system call
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            Ok(String::from_utf8_lossy(&buf[..total_read]).to_string())
         }
 
         pub fn try_read_output(&mut self) -> Result<String> {
-            Err(Error::new(ErrorKind::Unsupported, "Not implemented on Windows"))
+            // Check if the process is still alive
+            if !self.is_alive() {
+                return Err(Error::new(ErrorKind::BrokenPipe, "PTY process has terminated"));
+            }
+            
+            let mut reader = self.reader.lock().unwrap();
+            let mut buf = vec![0u8; 10240];
+            let mut total_read = 0;
+            
+            // Non-blocking read attempt
+            loop {
+                match reader.read(&mut buf[total_read..]) {
+                    Ok(0) => {
+                        // Check if process died
+                        if !self.is_alive() && total_read == 0 {
+                            return Err(Error::new(ErrorKind::BrokenPipe, "PTY process terminated"));
+                        }
+                        break;
+                    }
+                    Ok(n) => {
+                        total_read += n;
+                        if total_read >= buf.len() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        break; // No more data available
+                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {
+                        // Retry on interrupted system call
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            
+            Ok(String::from_utf8_lossy(&buf[..total_read]).to_string())
+        }
+        
+        pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+            self.pty_pair
+                .master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to resize PTY: {}", e)))?;
+            Ok(())
+        }
+        
+        pub fn is_alive(&mut self) -> bool {
+            // Check if the child process is still running
+            self.child.try_wait().is_none()
+        }
+        
+        pub fn kill(&mut self) -> Result<()> {
+            // Attempt to kill the child process gracefully
+            self.child
+                .kill()
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to kill process: {}", e)))?;
+            Ok(())
+        }
+    }
+
+    impl Drop for PtyImpl {
+        fn drop(&mut self) {
+            // Ensure the child process is terminated when the PTY is dropped
+            // This prevents zombie processes on Windows
+            if self.is_alive() {
+                let _ = self.kill();
+            }
         }
     }
 
@@ -334,7 +543,8 @@ mod windows_impl {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("PtyImpl")
                 .field("shell", &self.shell)
-                .field("status", &"Not implemented")
+                .field("status", &"ConPTY")
+                .field("alive", &self.child.try_wait().is_none())
                 .finish()
         }
     }

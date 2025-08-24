@@ -9,6 +9,7 @@ mod error;
 mod events;
 #[cfg(not(target_os = "windows"))]
 mod pty;
+mod pty_cross;
 mod terminal;
 mod ui;
 
