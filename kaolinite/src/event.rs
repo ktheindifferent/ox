@@ -117,6 +117,7 @@ impl Document {
         self.file = snapshot.content;
         self.cursor = snapshot.cursor;
         self.char_ptr = self.character_idx(&snapshot.cursor.loc);
+        self.old_cursor = snapshot.cursor.loc.x;
         self.reload_lines();
         self.bring_cursor_in_viewport();
     }

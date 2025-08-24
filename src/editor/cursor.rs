@@ -172,11 +172,14 @@ pub fn handle_multiple_cursors(
     ged!(mut &editor).try_doc_mut().unwrap().secondary_cursors = secondary_cursors;
     ged!(mut &editor).macro_man.playing = false;
     // Restore back to the state of the document beforehand
-    // TODO: calculate char_ptr and old_cursor too
+    // First set the cursor position
     ged!(mut &editor).try_doc_mut().unwrap().cursor = cursor;
+    // Calculate and set the character pointer based on the cursor location
     let char_ptr = ged!(&editor).try_doc().unwrap().character_idx(&cursor.loc);
     ged!(mut &editor).try_doc_mut().unwrap().char_ptr = char_ptr;
+    // Store the current x position for vertical navigation (up/down movements)
     ged!(mut &editor).try_doc_mut().unwrap().old_cursor = cursor.loc.x;
+    // Clear any selection
     ged!(mut &editor).try_doc_mut().unwrap().cancel_selection();
     Ok(())
 }
