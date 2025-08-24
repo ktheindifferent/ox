@@ -188,8 +188,8 @@ end
 
 -- Verify whether the plug-in is being imported in the configuration file
 function plugin_manager:plugin_in_config(plugin)
-    -- Find the configuration file path
-    local path = home .. "/.oxrc"
+    -- Find the configuration file path (cross-platform)
+    local path = build_path(home, ".oxrc")
     -- Open the document
     local file = io.open(path, "r")
     if not file then return false end
@@ -208,7 +208,7 @@ end
 
 -- Append the plug-in import code to the configuration file so it is loaded
 function plugin_manager:append_to_config(plugin)
-    local path = home .. "/.oxrc"
+    local path = build_path(home, ".oxrc")
     local file = io.open(path, "a")
     if not file then
         return "Failed to open configuration file"
@@ -220,8 +220,8 @@ end
 
 -- Remove plug-in import code from the configuration file
 function plugin_manager:remove_from_config(plugin)
-    -- Find the configuration file path
-    local path = home .. "/.oxrc"
+    -- Find the configuration file path (cross-platform)
+    local path = build_path(home, ".oxrc")
     -- Open the configuration file
     local file = io.open(path, "r")
     if not file then

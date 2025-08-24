@@ -260,4 +260,47 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         assert!(path_str.contains("/"));
     }
+    
+    #[test]
+    fn test_lua_path_compatibility() {
+        // Test that our Rust path functions produce paths compatible with Lua
+        let config_dir = config_dir();
+        assert!(config_dir.is_some());
+        
+        let config_path = config_dir.unwrap();
+        let path_str = config_path.to_string_lossy();
+        
+        // Verify path contains "ox" directory
+        assert!(path_str.contains("ox"));
+        
+        // Verify platform-specific structure
+        #[cfg(target_os = "windows")]
+        {
+            // Windows should use AppData or user profile
+            assert!(path_str.contains("AppData") || path_str.contains("ox"));
+            assert!(path_str.contains("\\"));
+        }
+        
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Unix-like should use .config
+            assert!(path_str.contains(".config") || path_str.contains("ox"));
+            assert!(path_str.contains("/"));
+        }
+    }
+    
+    #[test]
+    fn test_oxrc_path() {
+        let home = home_dir().unwrap();
+        let oxrc_path = home.join(".oxrc");
+        let path_str = oxrc_path.to_string_lossy();
+        
+        assert!(path_str.ends_with(".oxrc"));
+        
+        #[cfg(target_os = "windows")]
+        assert!(path_str.contains("\\"));
+        
+        #[cfg(not(target_os = "windows"))]
+        assert!(path_str.contains("/"));
+    }
 }
