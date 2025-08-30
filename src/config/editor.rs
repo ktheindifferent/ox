@@ -792,9 +792,13 @@ impl LuaUserData for Editor {
         methods.add_method_mut("open_terminal_up", |_, editor, cmd: Option<String>| {
             if let Ok(term) = Pty::new(config!(editor.config, terminal).shell) {
                 if let Some(cmd) = cmd {
-                    term.lock()
-                        .unwrap()
-                        .silent_run_command(&format!("{cmd}\n"))?;
+                    match term.lock() {
+                        Ok(mut pty) => pty.silent_run_command(&format!("{cmd}\n"))?,
+                        Err(e) => {
+                            eprintln!("Failed to lock PTY: {}", e);
+                            return Ok(false);
+                        }
+                    }
                 }
                 editor.ptr = editor
                     .files
@@ -809,9 +813,13 @@ impl LuaUserData for Editor {
         methods.add_method_mut("open_terminal_down", |_, editor, cmd: Option<String>| {
             if let Ok(term) = Pty::new(config!(editor.config, terminal).shell) {
                 if let Some(cmd) = cmd {
-                    term.lock()
-                        .unwrap()
-                        .silent_run_command(&format!("{cmd}\n"))?;
+                    match term.lock() {
+                        Ok(mut pty) => pty.silent_run_command(&format!("{cmd}\n"))?,
+                        Err(e) => {
+                            eprintln!("Failed to lock PTY: {}", e);
+                            return Ok(false);
+                        }
+                    }
                 }
                 editor.ptr = editor
                     .files
@@ -826,9 +834,13 @@ impl LuaUserData for Editor {
         methods.add_method_mut("open_terminal_left", |_, editor, cmd: Option<String>| {
             if let Ok(term) = Pty::new(config!(editor.config, terminal).shell) {
                 if let Some(cmd) = cmd {
-                    term.lock()
-                        .unwrap()
-                        .silent_run_command(&format!("{cmd}\n"))?;
+                    match term.lock() {
+                        Ok(mut pty) => pty.silent_run_command(&format!("{cmd}\n"))?,
+                        Err(e) => {
+                            eprintln!("Failed to lock PTY: {}", e);
+                            return Ok(false);
+                        }
+                    }
                 }
                 editor.ptr = editor
                     .files
@@ -843,9 +855,13 @@ impl LuaUserData for Editor {
         methods.add_method_mut("open_terminal_right", |_, editor, cmd: Option<String>| {
             if let Ok(term) = Pty::new(config!(editor.config, terminal).shell) {
                 if let Some(cmd) = cmd {
-                    term.lock()
-                        .unwrap()
-                        .silent_run_command(&format!("{cmd}\n"))?;
+                    match term.lock() {
+                        Ok(mut pty) => pty.silent_run_command(&format!("{cmd}\n"))?,
+                        Err(e) => {
+                            eprintln!("Failed to lock PTY: {}", e);
+                            return Ok(false);
+                        }
+                    }
                 }
                 editor.ptr = editor
                     .files
@@ -888,20 +904,30 @@ impl LuaUserData for Editor {
                             {
                                 if let Some(compile_cmd) = compile {
                                     let compile_cmd = compile_cmd.replace("{file_path}", &path);
-                                    term.lock()
-                                        .unwrap()
-                                        .run_command(&format!("{compile_cmd}\n"))?;
+                                    match term.lock() {
+                                        Ok(mut pty) => pty.run_command(&format!("{compile_cmd}\n"))?,
+                                        Err(e) => {
+                                            eprintln!("Failed to lock PTY: {}", e);
+                                            return Ok(false);
+                                        }
+                                    }
                                 }
                                 if let Some(run_cmd) = run {
                                     let run_cmd = run_cmd.replace("{file_path}", &path);
-                                    term.lock().unwrap().run_command(&format!("{run_cmd}\n"))?;
+                                    match term.lock() {
+                                        Ok(mut pty) => pty.run_command(&format!("{run_cmd}\n"))?,
+                                        Err(e) => {
+                                            eprintln!("Failed to lock PTY: {}", e);
+                                            return Ok(false);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            Ok(())
+            Ok(true)
         });
         // Miscellaneous
         methods.add_method_mut("open_command_line", |_, editor, ()| {

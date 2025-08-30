@@ -450,12 +450,19 @@ impl FileLayout {
         match self {
             Self::None | Self::FileTree | Self::Atom(_, _) => false,
             Self::Terminal(term) => {
-                let mut term = term.lock().unwrap();
-                if term.force_rerender {
-                    term.force_rerender = false;
-                    true
-                } else {
-                    false
+                match term.lock() {
+                    Ok(mut guard) => {
+                        if guard.force_rerender {
+                            guard.force_rerender = false;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to lock terminal: {}", e);
+                        false
+                    }
                 }
             }
             Self::SideBySide(layouts) | Self::TopToBottom(layouts) => {

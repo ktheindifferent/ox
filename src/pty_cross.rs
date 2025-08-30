@@ -29,8 +29,11 @@
 //! - Threads are gracefully shut down
 
 use mlua::prelude::*;
-use std::io::{Read, Result, Write};
+use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use crate::pty_error::{PtyError, PtyResult, PtyErrorContext, recover_lock_poisoned};
 
 #[cfg(not(target_os = "windows"))]
 mod unix_impl;
@@ -215,8 +218,9 @@ pub struct Pty {
 }
 
 impl Pty {
-    pub fn new(shell: Shell) -> Result<Arc<Mutex<Self>>> {
-        let inner = platform::PtyImpl::new(shell)?;
+    pub fn new(shell: Shell) -> PtyResult<Arc<Mutex<Self>>> {
+        let inner = platform::PtyImpl::new(shell)
+            .map_err(|e| PtyError::InitializationFailed(format!("Failed to create PTY: {}", e)))?;
         let pty = Arc::new(Mutex::new(Self {
             inner,
             output: String::new(),
@@ -225,29 +229,51 @@ impl Pty {
             force_rerender: false,
         }));
         
-        // Initialize the PTY
-        pty.lock().unwrap().initialize()?;
+        // Initialize the PTY with proper error handling
+        {
+            let mut pty_guard = pty.lock()
+                .unwrap_or_else(recover_lock_poisoned);
+            pty_guard.initialize()
+                .map_err(|e| PtyError::InitializationFailed(format!("Failed to initialize PTY: {}", e)))?;
+        }
         
         // Spawn thread to constantly read from the terminal
         let pty_clone = Arc::clone(&pty);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let mut pty = pty_clone.lock().unwrap();
-            pty.force_rerender = matches!(pty.catch_up(), Ok(true));
-            std::mem::drop(pty);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                
+                // Try to acquire lock with timeout
+                match pty_clone.try_lock() {
+                    Ok(mut pty) => {
+                        pty.force_rerender = matches!(pty.catch_up(), Ok(true));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(err)) => {
+                        // Recover from poisoned lock
+                        let mut pty = recover_lock_poisoned(err);
+                        pty.force_rerender = matches!(pty.catch_up(), Ok(true));
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        // Lock is held by another thread, skip this iteration
+                        // Lock is held by another thread, skip this iteration
+                    }
+                }
+            }
         });
         
         Ok(pty)
     }
 
-    fn initialize(&mut self) -> Result<()> {
-        self.inner.set_echo(false)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        self.run_command("")?;
+    fn initialize(&mut self) -> PtyResult<()> {
+        self.inner.set_echo(false)
+            .context("Failed to set echo mode")?;
+        std::thread::sleep(Duration::from_millis(100));
+        self.run_command("")
+            .context("Failed to run initial command")?;
         Ok(())
     }
 
-    pub fn run_command(&mut self, cmd: &str) -> Result<()> {
+    pub fn run_command(&mut self, cmd: &str) -> PtyResult<()> {
         self.inner.write_input(cmd)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
         
@@ -265,7 +291,7 @@ impl Pty {
         Ok(())
     }
 
-    pub fn silent_run_command(&mut self, cmd: &str) -> Result<()> {
+    pub fn silent_run_command(&mut self, cmd: &str) -> PtyResult<()> {
         self.output.clear();
         self.run_command(cmd)?;
         if self.output.starts_with(cmd) {
@@ -274,7 +300,7 @@ impl Pty {
         Ok(())
     }
 
-    pub fn char_input(&mut self, c: char) -> Result<()> {
+    pub fn char_input(&mut self, c: char) -> PtyResult<()> {
         self.input.push(c);
         if c == '\n' {
             self.run_command(&self.input.to_string())?;
@@ -287,14 +313,14 @@ impl Pty {
         self.input.pop();
     }
 
-    pub fn clear(&mut self) -> Result<()> {
+    pub fn clear(&mut self) -> PtyResult<()> {
         self.output.clear();
         self.run_command("\n")?;
         self.output = self.output.trim_start_matches('\n').to_string();
         Ok(())
     }
 
-    pub fn catch_up(&mut self) -> Result<bool> {
+    pub fn catch_up(&mut self) -> PtyResult<bool> {
         let output = self.inner.try_read_output()?;
         if !output.is_empty() {
             let mut processed = output;
@@ -311,12 +337,12 @@ impl Pty {
 
 #[cfg(not(target_os = "windows"))]
 mod unix_impl {
-    use super::Shell;
+    use super::{Shell, PtyError, PtyResult, PtyErrorContext};
     use mio::unix::SourceFd;
     use mio::{Events, Interest, Poll, Token};
     use nix::fcntl::{fcntl, FcntlArg, OFlag};
     use ptyprocess::PtyProcess;
-    use std::io::{BufReader, Read, Result, Write};
+    use std::io::{BufReader, Read, Write};
     use std::os::unix::io::AsRawFd;
     use std::process::Command;
     use std::time::Duration;
@@ -327,59 +353,71 @@ mod unix_impl {
     }
 
     impl PtyImpl {
-        pub fn new(shell: Shell) -> Result<Self> {
+        pub fn new(shell: Shell) -> PtyResult<Self> {
+            let process = PtyProcess::spawn(Command::new(shell.command()))
+                .map_err(|e| PtyError::SpawnFailed(format!("Failed to spawn {}: {}", shell.command(), e)))?;
             Ok(Self {
-                process: PtyProcess::spawn(Command::new(shell.command()))?,
+                process,
                 shell,
             })
         }
 
-        pub fn set_echo(&mut self, echo: bool) -> Result<()> {
-            self.process.set_echo(echo, None)?;
+        pub fn set_echo(&mut self, echo: bool) -> PtyResult<()> {
+            self.process.set_echo(echo, None)
+                .context("Failed to set PTY echo mode")?;
             Ok(())
         }
 
-        pub fn write_input(&mut self, input: &str) -> Result<()> {
-            let mut stream = self.process.get_raw_handle()?;
-            write!(stream, "{}", input)?;
+        pub fn write_input(&mut self, input: &str) -> PtyResult<()> {
+            let mut stream = self.process.get_raw_handle()
+                .context("Failed to get PTY handle")?;
+            write!(stream, "{}", input)
+                .context("Failed to write to PTY")?;
             Ok(())
         }
 
-        pub fn read_output(&mut self) -> Result<String> {
-            let mut stream = self.process.get_raw_handle()?;
+        pub fn read_output(&mut self) -> PtyResult<String> {
+            let mut stream = self.process.get_raw_handle()
+                .context("Failed to get PTY handle")?;
             let mut reader = BufReader::new(stream);
             let mut buf = [0u8; 10240];
-            let bytes_read = reader.read(&mut buf)?;
+            let bytes_read = reader.read(&mut buf)
+                .context("Failed to read from PTY")?;
             Ok(String::from_utf8_lossy(&buf[..bytes_read]).to_string())
         }
 
-        pub fn try_read_output(&mut self) -> Result<String> {
-            let stream = self.process.get_raw_handle()?;
+        pub fn try_read_output(&mut self) -> PtyResult<String> {
+            let stream = self.process.get_raw_handle()
+                .context("Failed to get PTY handle")?;
             let raw_fd = stream.as_raw_fd();
             
             // Set non-blocking mode
-            let flags = fcntl(raw_fd, FcntlArg::F_GETFL).unwrap();
+            let flags = fcntl(raw_fd, FcntlArg::F_GETFL)
+                .map_err(|e| PtyError::PlatformError(format!("Failed to get file flags: {}", e)))?;
             fcntl(
                 raw_fd,
                 FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
             )
-            .unwrap();
+            .map_err(|e| PtyError::PlatformError(format!("Failed to set non-blocking mode: {}", e)))?;
             
             let mut source = SourceFd(&raw_fd);
-            let mut poll = Poll::new()?;
+            let mut poll = Poll::new()
+                .context("Failed to create poll instance")?;
             let mut events = Events::with_capacity(128);
             
             poll.registry()
-                .register(&mut source, Token(0), Interest::READABLE)?;
+                .register(&mut source, Token(0), Interest::READABLE)
+                .context("Failed to register poll interest")?;
             
             match poll.poll(&mut events, Some(Duration::from_millis(100))) {
                 Ok(()) => {
                     let mut reader = BufReader::new(stream);
                     let mut buf = [0u8; 10240];
-                    let bytes_read = reader.read(&mut buf)?;
+                    let bytes_read = reader.read(&mut buf)
+                        .context("Failed to read from PTY")?;
                     Ok(String::from_utf8_lossy(&buf[..bytes_read]).to_string())
                 }
-                Err(e) => Err(e),
+                Err(e) => Err(PtyError::from(e)),
             }
         }
     }
@@ -395,9 +433,9 @@ mod unix_impl {
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use super::Shell;
+    use super::{Shell, PtyError, PtyResult, PtyErrorContext, recover_lock_poisoned};
     use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem, MasterPty, Child};
-    use std::io::{Result, Error, ErrorKind, Read, Write};
+    use std::io::{Error, ErrorKind, Read, Write};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     
@@ -410,7 +448,7 @@ mod windows_impl {
     }
 
     impl PtyImpl {
-        pub fn new(shell: Shell) -> Result<Self> {
+        pub fn new(shell: Shell) -> PtyResult<Self> {
             // Get the native PTY system (ConPTY on Windows 10+)
             let pty_system = native_pty_system();
             
@@ -425,7 +463,7 @@ mod windows_impl {
             // Create a new PTY pair
             let pair = pty_system
                 .openpty(pty_size)
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to open PTY: {}", e)))?;
+                .map_err(|e| PtyError::InitializationFailed(format!("Failed to open PTY: {}", e)))?;
             
             // Build the command for the shell
             let mut cmd = CommandBuilder::new(shell.command());
@@ -450,16 +488,16 @@ mod windows_impl {
             // Spawn the shell process
             let child = pair.slave
                 .spawn_command(cmd)
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to spawn shell: {}", e)))?;
+                .map_err(|e| PtyError::SpawnFailed(format!("Failed to spawn shell: {}", e)))?;
             
             // Get reader and writer handles
             let reader = pair.master
                 .try_clone_reader()
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to clone reader: {}", e)))?;
+                .map_err(|e| PtyError::InitializationFailed(format!("Failed to clone reader: {}", e)))?;
             
             let writer = pair.master
                 .take_writer()
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to get writer: {}", e)))?;
+                .map_err(|e| PtyError::InitializationFailed(format!("Failed to get writer: {}", e)))?;
             
             Ok(Self {
                 shell,
@@ -470,42 +508,38 @@ mod windows_impl {
             })
         }
 
-        pub fn set_echo(&mut self, _echo: bool) -> Result<()> {
+        pub fn set_echo(&mut self, _echo: bool) -> PtyResult<()> {
             // ConPTY handles echo internally, so this is a no-op on Windows
             // The terminal emulation layer manages echo behavior
             Ok(())
         }
 
-        pub fn write_input(&mut self, input: &str) -> Result<()> {
+        pub fn write_input(&mut self, input: &str) -> PtyResult<()> {
             // Check if the child process is still alive before writing
             if !self.is_alive() {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "Cannot write to PTY: child process has terminated"
-                ));
+                return Err(PtyError::ProcessTerminated);
             }
             
             // Write the input and handle potential errors
             match self.writer.write_all(input.as_bytes()) {
                 Ok(_) => {
                     // Flush to ensure data is sent immediately
-                    self.writer.flush()?;
+                    self.writer.flush()
+                        .context("Failed to flush PTY writer")?;
                     Ok(())
                 }
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => {
                     // The pipe is broken, likely because the child exited
-                    Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        format!("PTY write failed: {}", e)
-                    ))
+                    Err(PtyError::ProcessTerminated)
                 }
-                Err(e) => Err(e),
+                Err(e) => Err(PtyError::from(e)),
             }
         }
 
-        pub fn read_output(&mut self) -> Result<String> {
+        pub fn read_output(&mut self) -> PtyResult<String> {
             let mut buffer = vec![0u8; 10240];
-            let mut reader = self.reader.lock().unwrap();
+            let mut reader = self.reader.lock()
+                .unwrap_or_else(recover_lock_poisoned);
             
             // Set a timeout for reading to avoid blocking indefinitely
             // Note: portable-pty handles non-blocking I/O internally
@@ -515,25 +549,21 @@ mod windows_impl {
                 }
                 Ok(_) => Ok(String::new()),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(String::new()),
-                Err(e) => Err(e),
+                Err(e) => Err(PtyError::from(e)),
             }
         }
 
-        pub fn try_read_output(&mut self) -> Result<String> {
+        pub fn try_read_output(&mut self) -> PtyResult<String> {
             // Check if the child process is still alive
             if !self.is_alive() {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "PTY child process has terminated"
-                ));
+                return Err(PtyError::ProcessTerminated);
             }
             
             let mut buffer = vec![0u8; 10240];
             let reader = self.reader.clone();
             
             // Try to read without blocking
-            let reader_guard = reader.try_lock();
-            match reader_guard {
+            match reader.try_lock() {
                 Ok(mut reader) => {
                     // Attempt non-blocking read
                     match reader.read(&mut buffer) {
@@ -546,22 +576,33 @@ mod windows_impl {
                         Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                             // Child process may have exited
                             if !self.is_alive() {
-                                Err(Error::new(ErrorKind::BrokenPipe, "PTY closed"))
+                                Err(PtyError::ProcessTerminated)
                             } else {
                                 Ok(String::new())
                             }
                         }
-                        Err(e) => Err(e),
+                        Err(e) => Err(PtyError::from(e)),
                     }
                 }
-                Err(_) => {
+                Err(std::sync::TryLockError::Poisoned(err)) => {
+                    // Recover from poisoned lock
+                    let mut reader = recover_lock_poisoned(err);
+                    match reader.read(&mut buffer) {
+                        Ok(n) if n > 0 => Ok(String::from_utf8_lossy(&buffer[..n]).to_string()),
+                        Ok(_) => Ok(String::new()),
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(String::new()),
+                        Err(e) => Err(PtyError::from(e)),
+                    }
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // Reader is locked, return empty string
                     // Reader is locked, return empty string
                     Ok(String::new())
                 }
             }
         }
         
-        pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        pub fn resize(&mut self, rows: u16, cols: u16) -> PtyResult<()> {
             let size = PtySize {
                 rows,
                 cols,
@@ -571,7 +612,7 @@ mod windows_impl {
             
             self.master
                 .resize(size)
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to resize PTY: {}", e)))?;
+                .map_err(|e| PtyError::PlatformError(format!("Failed to resize PTY: {}", e)))?;
             
             Ok(())
         }
@@ -683,7 +724,8 @@ mod tests {
         
         if let Ok(pty) = result {
             // Basic sanity checks
-            let pty_lock = pty.lock().unwrap();
+            let pty_lock = pty.lock()
+                .unwrap_or_else(recover_lock_poisoned);
             assert_eq!(pty_lock.shell.command(), "cmd.exe");
             assert!(pty_lock.output.is_empty() || !pty_lock.output.is_empty());
             assert!(pty_lock.input.is_empty());
@@ -708,7 +750,8 @@ mod tests {
             
             // Try to send a simple command
             {
-                let mut pty_lock = pty.lock().unwrap();
+                let mut pty_lock = pty.lock()
+                    .unwrap_or_else(recover_lock_poisoned);
                 let result = pty_lock.run_command("echo test\n");
                 
                 if result.is_ok() {
@@ -716,7 +759,8 @@ mod tests {
                     drop(pty_lock);
                     thread::sleep(Duration::from_millis(500));
                     
-                    let pty_lock = pty.lock().unwrap();
+                    let pty_lock = pty.lock()
+                        .unwrap_or_else(recover_lock_poisoned);
                     // Output should contain "test" somewhere
                     let output = &pty_lock.output;
                     println!("PTY output: {:?}", output);
@@ -732,7 +776,8 @@ mod tests {
     fn test_pty_resize() {
         // Test that resize method exists and doesn't panic
         if let Ok(pty) = Pty::new(Shell::Cmd) {
-            let mut pty_lock = pty.lock().unwrap();
+            let mut pty_lock = pty.lock()
+                .unwrap_or_else(recover_lock_poisoned);
             // This should work even if the underlying resize operation fails
             let _ = pty_lock.inner.resize(30, 100);
         }
@@ -747,7 +792,8 @@ mod tests {
         let result = Pty::new(Shell::Bash);
         
         if let Ok(pty) = result {
-            let pty_lock = pty.lock().unwrap();
+            let pty_lock = pty.lock()
+                .unwrap_or_else(recover_lock_poisoned);
             assert_eq!(pty_lock.shell.command(), "bash");
         } else {
             // May fail in restricted environments

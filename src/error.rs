@@ -28,6 +28,11 @@ error_set! {
         AlreadyOpen {
             file: String,
         },
+        #[cfg(not(target_os = "windows"))]
+        #[display("PTY error: {}", msg)]
+        Pty {
+            msg: String
+        },
         InvalidPath,
         // None, <--- Needed???
     };
@@ -35,3 +40,12 @@ error_set! {
 
 /// Easy syntax sugar to have functions return the custom error type
 pub type Result<T> = std::result::Result<T, OxError>;
+
+#[cfg(not(target_os = "windows"))]
+impl From<crate::pty_error::PtyError> for OxError {
+    fn from(err: crate::pty_error::PtyError) -> Self {
+        OxError::Pty {
+            msg: err.to_string(),
+        }
+    }
+}
