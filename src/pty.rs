@@ -2,10 +2,9 @@
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
-use mlua::prelude::*;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use ptyprocess::PtyProcess;
-use std::io::{BufReader, Read, Result, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -13,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+use crate::pty_error::{PtyError, PtyResult, recover_lock_poisoned};
 
 pub struct Pty {
     pub process: PtyProcess,
@@ -42,7 +43,7 @@ impl Shell {
         !matches!(self, Self::Zsh)
     }
 
-    pub fn command(&self) -> &str {
+    pub fn command(self) -> &'static str {
         match self {
             Self::Bash => "bash",
             Self::Dash => "dash",
@@ -50,42 +51,33 @@ impl Shell {
             Self::Fish => "fish",
         }
     }
-}
 
-impl IntoLua for Shell {
-    fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
-        let string = lua.create_string(self.command())?;
-        Ok(LuaValue::String(string))
-    }
-}
-
-impl FromLua for Shell {
-    fn from_lua(val: LuaValue, _: &Lua) -> LuaResult<Self> {
-        Ok(if let LuaValue::String(inner) = val {
-            if let Ok(s) = inner.to_str() {
-                match s.to_owned().as_str() {
-                    "dash" => Self::Dash,
-                    "zsh" => Self::Zsh,
-                    "fish" => Self::Fish,
-                    _ => Self::Bash,
-                }
+    pub fn detect() -> Self {
+        std::env::var("SHELL").map_or(Self::Bash, |shell| {
+            if shell.ends_with("zsh") {
+                Self::Zsh
+            } else if shell.ends_with("fish") {
+                Self::Fish
+            } else if shell.ends_with("dash") {
+                Self::Dash
             } else {
                 Self::Bash
             }
-        } else {
-            Self::Bash
         })
     }
 }
 
 impl Pty {
-    pub fn new(shell: Shell) -> Result<Arc<Mutex<Self>>> {
+    pub fn new(shell: Shell) -> PtyResult<Arc<Mutex<Self>>> {
+        let process = PtyProcess::spawn(Command::new(shell.command()))
+            .map_err(|e| PtyError::SpawnFailed(format!("Failed to spawn {}: {}", shell.command(), e)))?;
+            
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let force_rerender = Arc::new(AtomicBool::new(false));
         let (update_sender, update_receiver) = channel::<bool>();
         
         let pty = Arc::new(Mutex::new(Self {
-            process: PtyProcess::spawn(Command::new(shell.command()))?,
+            process,
             output: String::new(),
             input: String::new(),
             shell,
@@ -95,10 +87,22 @@ impl Pty {
             update_receiver,
         }));
         
-        // Initialize
-        pty.lock().unwrap().process.set_echo(false, None)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        pty.lock().unwrap().run_command("")?;
+        // Initialize PTY with proper error handling
+        {
+            let mut pty_guard = pty.lock()
+                .unwrap_or_else(recover_lock_poisoned);
+            pty_guard.process.set_echo(false, None)
+                .map_err(|e| PtyError::InitializationFailed(format!("Failed to set PTY echo mode: {}", e)))?;
+        }
+        
+        std::thread::sleep(Duration::from_millis(100));
+        
+        {
+            let mut pty_guard = pty.lock()
+                .unwrap_or_else(recover_lock_poisoned);
+            pty_guard.run_command("")
+                .map_err(|e| PtyError::InitializationFailed(format!("Failed to run initial command: {:?}", e)))?;
+        }
         
         // Spawn reader thread with proper lifecycle management
         let pty_clone = Arc::clone(&pty);
@@ -111,38 +115,58 @@ impl Pty {
                     // Try to read with a timeout to allow checking shutdown flag
                     std::thread::sleep(Duration::from_millis(50));
                     
-                    // Attempt to lock and read
-                    if let Ok(mut pty) = pty_clone.try_lock() {
-                        match pty.catch_up() {
-                            Ok(true) => {
-                                force_rerender_clone.store(true, Ordering::Relaxed);
-                                // Send update notification
-                                let _ = update_sender.send(true);
+                    // Try to acquire lock with timeout
+                    match pty_clone.try_lock() {
+                        Ok(mut pty) => {
+                            match pty.catch_up() {
+                                Ok(true) => {
+                                    force_rerender_clone.store(true, Ordering::Relaxed);
+                                    // Send update notification
+                                    let _ = update_sender.send(true);
+                                }
+                                Ok(false) => {
+                                    // No data available, continue
+                                }
+                                Err(_) => {
+                                    // Error reading, might indicate PTY is closed
+                                    // Continue for now, Drop will handle cleanup
+                                }
                             }
-                            Ok(false) => {
-                                // No data available, continue
+                        }
+                        Err(std::sync::TryLockError::Poisoned(err)) => {
+                            // Recover from poisoned lock
+                            let mut pty = recover_lock_poisoned(err);
+                            match pty.catch_up() {
+                                Ok(true) => {
+                                    force_rerender_clone.store(true, Ordering::Relaxed);
+                                    let _ = update_sender.send(true);
+                                }
+                                _ => {}
                             }
-                            Err(_) => {
-                                // Error reading, might indicate PTY is closed
-                                // Continue for now, Drop will handle cleanup
-                            }
+                        }
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            // Lock is held by another thread, skip this iteration
                         }
                     }
                 }
             })
-            .expect("Failed to spawn PTY reader thread");
+            .map_err(|e| PtyError::InitializationFailed(format!("Failed to spawn PTY reader thread: {}", e)))?;
         
         // Store the thread handle
-        pty.lock().unwrap().reader_thread = Some(thread_handle);
+        pty.lock()
+            .unwrap_or_else(recover_lock_poisoned)
+            .reader_thread = Some(thread_handle);
         
         Ok(pty)
     }
 
-    pub fn run_command(&mut self, cmd: &str) -> Result<()> {
-        let mut stream = self.process.get_raw_handle()?;
+    pub fn run_command(&mut self, cmd: &str) -> PtyResult<()> {
+        let mut stream = self.process.get_raw_handle()
+            .map_err(|e| PtyError::CommunicationError(format!("Failed to get PTY handle: {}", e)))?;
         // Write the command
-        write!(stream, "{cmd}")?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        write!(stream, "{cmd}")
+            .map_err(|e| PtyError::CommunicationError(format!("Failed to write command to PTY: {}", e)))?;
+        std::thread::sleep(Duration::from_millis(100));
         if self.shell.manual_input_echo() {
             // println!("Adding (pre-cmd) {:?}", cmd);
             self.output += cmd;
@@ -150,7 +174,8 @@ impl Pty {
         // Read the output
         let mut reader = BufReader::new(stream);
         let mut buf = [0u8; 10240];
-        let bytes_read = reader.read(&mut buf)?;
+        let bytes_read = reader.read(&mut buf)
+            .map_err(|e| PtyError::CommunicationError(format!("Failed to read PTY output: {}", e)))?;
         let mut output = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
         // Add on the output
         if self.shell.inserts_extra_newline() {
@@ -161,7 +186,7 @@ impl Pty {
         Ok(())
     }
 
-    pub fn silent_run_command(&mut self, cmd: &str) -> Result<()> {
+    pub fn silent_run_command(&mut self, cmd: &str) -> PtyResult<()> {
         self.output.clear();
         self.run_command(cmd)?;
         if self.output.starts_with(cmd) {
@@ -170,7 +195,7 @@ impl Pty {
         Ok(())
     }
 
-    pub fn char_input(&mut self, c: char) -> Result<()> {
+    pub fn char_input(&mut self, c: char) -> PtyResult<()> {
         self.input.push(c);
         if c == '\n' {
             // Return key pressed, send the input
@@ -184,34 +209,42 @@ impl Pty {
         self.input.pop();
     }
 
-    pub fn clear(&mut self) -> Result<()> {
+    pub fn clear(&mut self) -> PtyResult<()> {
         self.output.clear();
         self.run_command("\n")?;
         self.output = self.output.trim_start_matches('\n').to_string();
         Ok(())
     }
 
-    pub fn catch_up(&mut self) -> Result<bool> {
-        let stream = self.process.get_raw_handle()?;
+    pub fn catch_up(&mut self) -> PtyResult<bool> {
+        let stream = self.process.get_raw_handle()
+            .map_err(|e| PtyError::CommunicationError(format!("Failed to get PTY handle: {}", e)))?;
         let raw_fd = stream.as_raw_fd();
-        let flags = fcntl(raw_fd, FcntlArg::F_GETFL).unwrap();
+        
+        let flags = fcntl(raw_fd, FcntlArg::F_GETFL)
+            .map_err(|e| PtyError::PlatformError(format!("Failed to get file flags: {}", e)))?;
         fcntl(
             raw_fd,
             FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
         )
-        .unwrap();
+        .map_err(|e| PtyError::PlatformError(format!("Failed to set non-blocking mode: {}", e)))?;
+        
         let mut source = SourceFd(&raw_fd);
         // Set up mio Poll and register the raw_fd
-        let mut poll = Poll::new()?;
+        let mut poll = Poll::new()
+            .map_err(|e| PtyError::PlatformError(format!("Failed to create poll instance: {}", e)))?;
         let mut events = Events::with_capacity(128);
         poll.registry()
-            .register(&mut source, Token(0), Interest::READABLE)?;
+            .register(&mut source, Token(0), Interest::READABLE)
+            .map_err(|e| PtyError::PlatformError(format!("Failed to register poll interest: {}", e)))?;
+            
         match poll.poll(&mut events, Some(Duration::from_millis(100))) {
             Ok(()) => {
                 // Data is available to read
                 let mut reader = BufReader::new(stream);
                 let mut buf = [0u8; 10240];
-                let bytes_read = reader.read(&mut buf)?;
+                let bytes_read = reader.read(&mut buf)
+                    .map_err(|e| PtyError::CommunicationError(format!("Failed to read from PTY: {}", e)))?;
 
                 // Process the read data
                 let mut output = String::from_utf8_lossy(&buf[..bytes_read]).to_string();
@@ -224,7 +257,7 @@ impl Pty {
                 self.output += &output;
                 Ok(!output.is_empty())
             }
-            Err(e) => Err(e),
+            Err(e) => Err(PtyError::from(e)),
         }
     }
     

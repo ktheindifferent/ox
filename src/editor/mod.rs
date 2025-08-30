@@ -503,16 +503,39 @@ impl Editor {
             #[cfg(not(target_os = "windows"))]
             Some(FileLayout::Terminal(term)) => match (modifiers, code) {
                 (KMod::NONE, KCode::Enter) => {
-                    term.lock().expect("Failed to lock terminal").char_input('\n')?
+                    match term.lock() {
+                        Ok(mut pty) => pty.char_input('\n')?,
+                        Err(e) => {
+                            eprintln!("Failed to lock terminal: {}", e);
+                            return Ok(());
+                        }
+                    }
                 }
                 (KMod::SHIFT | KMod::NONE, KCode::Char(ch)) => {
-                    term.lock().expect("Failed to lock terminal").char_input(ch)?;
+                    match term.lock() {
+                        Ok(mut pty) => pty.char_input(ch)?,
+                        Err(e) => {
+                            eprintln!("Failed to lock terminal: {}", e);
+                            return Ok(());
+                        }
+                    }
                 }
                 (KMod::NONE, KCode::Backspace) => {
-                    term.lock().expect("Failed to lock terminal").char_pop()
+                    match term.lock() {
+                        Ok(mut pty) => pty.char_pop(),
+                        Err(e) => {
+                            eprintln!("Failed to lock terminal: {}", e);
+                        }
+                    }
                 }
                 (KMod::CONTROL, KCode::Char('l')) => {
-                    term.lock().expect("Failed to lock terminal").clear()?
+                    match term.lock() {
+                        Ok(mut pty) => pty.clear()?,
+                        Err(e) => {
+                            eprintln!("Failed to lock terminal: {}", e);
+                            return Ok(());
+                        }
+                    }
                 }
                 _ => (),
             },

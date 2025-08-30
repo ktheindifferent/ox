@@ -444,8 +444,15 @@ impl FileLayout {
         match self {
             Self::None | Self::FileTree | Self::Atom(_, _) => false,
             Self::Terminal(term) => {
-                let term = term.lock().unwrap();
-                term.check_force_rerender()
+                match term.lock() {
+                    Ok(term) => {
+                        term.check_force_rerender()
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to lock terminal: {}", e);
+                        false
+                    }
+                }
             }
             Self::SideBySide(layouts) | Self::TopToBottom(layouts) => {
                 for layout in layouts.iter_mut() {

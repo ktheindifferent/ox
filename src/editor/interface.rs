@@ -642,7 +642,13 @@ impl Editor {
     #[cfg(not(target_os = "windows"))]
     fn render_terminal(&mut self, fc: &Vec<usize>, y: usize, l: usize, h: usize) -> Result<String> {
         if let Some(FileLayout::Terminal(term)) = self.files.get_raw(fc.to_owned()) {
-            let term = term.lock().unwrap();
+            let term = match term.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    eprintln!("Failed to lock terminal: {}", e);
+                    return Ok(String::new());
+                }
+            };
             let editor_fg = Fg(config!(self.config, colors).editor_fg.to_color()?).to_string();
             let editor_bg = Bg(config!(self.config, colors).editor_bg.to_color()?).to_string();
             let reset = SetAttribute(Attribute::NoBold);
