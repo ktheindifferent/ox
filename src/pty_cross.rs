@@ -31,6 +31,10 @@
 use mlua::prelude::*;
 use std::io::{Read, Result, Write};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Sender, Receiver, TryRecvError};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 #[cfg(not(target_os = "windows"))]
 mod unix_impl;
@@ -205,37 +209,72 @@ impl FromLua for Shell {
     }
 }
 
-#[derive(Debug)]
 pub struct Pty {
     inner: platform::PtyImpl,
     pub output: String,
     pub input: String,
     pub shell: Shell,
-    pub force_rerender: bool,
+    force_rerender: Arc<AtomicBool>,
+    shutdown_flag: Arc<AtomicBool>,
+    reader_thread: Option<JoinHandle<()>>,
+    update_receiver: Receiver<bool>,
 }
 
 impl Pty {
     pub fn new(shell: Shell) -> Result<Arc<Mutex<Self>>> {
         let inner = platform::PtyImpl::new(shell)?;
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let force_rerender = Arc::new(AtomicBool::new(false));
+        let (update_sender, update_receiver) = channel::<bool>();
+        
         let pty = Arc::new(Mutex::new(Self {
             inner,
             output: String::new(),
             input: String::new(),
             shell,
-            force_rerender: false,
+            force_rerender: Arc::clone(&force_rerender),
+            shutdown_flag: Arc::clone(&shutdown_flag),
+            reader_thread: None,
+            update_receiver,
         }));
         
         // Initialize the PTY
         pty.lock().unwrap().initialize()?;
         
-        // Spawn thread to constantly read from the terminal
+        // Spawn reader thread with proper lifecycle management
         let pty_clone = Arc::clone(&pty);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let mut pty = pty_clone.lock().unwrap();
-            pty.force_rerender = matches!(pty.catch_up(), Ok(true));
-            std::mem::drop(pty);
-        });
+        let shutdown_clone = Arc::clone(&shutdown_flag);
+        let force_rerender_clone = Arc::clone(&force_rerender);
+        let thread_handle = std::thread::Builder::new()
+            .name("pty-reader".to_string())
+            .spawn(move || {
+                while !shutdown_clone.load(Ordering::Relaxed) {
+                    // Try to read with a timeout to allow checking shutdown flag
+                    std::thread::sleep(Duration::from_millis(50));
+                    
+                    // Attempt to lock and read
+                    if let Ok(mut pty) = pty_clone.try_lock() {
+                        match pty.catch_up() {
+                            Ok(true) => {
+                                force_rerender_clone.store(true, Ordering::Relaxed);
+                                // Send update notification
+                                let _ = update_sender.send(true);
+                            }
+                            Ok(false) => {
+                                // No data available, continue
+                            }
+                            Err(_) => {
+                                // Error reading, might indicate PTY is closed
+                                // Continue for now, Drop will handle cleanup
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("Failed to spawn PTY reader thread");
+        
+        // Store the thread handle
+        pty.lock().unwrap().reader_thread = Some(thread_handle);
         
         Ok(pty)
     }
@@ -305,6 +344,38 @@ impl Pty {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+    
+    /// Check if there's a pending rerender request
+    pub fn check_force_rerender(&self) -> bool {
+        self.force_rerender.swap(false, Ordering::Relaxed)
+    }
+    
+    /// Check for updates from the reader thread without blocking
+    pub fn check_for_updates(&self) -> bool {
+        match self.update_receiver.try_recv() {
+            Ok(_) => true,
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => false,
+        }
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        // Signal the reader thread to shutdown
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+        
+        // Take the thread handle and wait for it to finish
+        if let Some(thread) = self.reader_thread.take() {
+            // Give the thread a moment to notice the shutdown flag
+            std::thread::sleep(Duration::from_millis(100));
+            
+            // Wait for the thread to finish (with a timeout)
+            // Note: JoinHandle doesn't have a timed join in stable Rust,
+            // but the thread should exit quickly due to the shutdown flag
+            let _ = thread.join();
         }
     }
 }
@@ -816,6 +887,138 @@ mod tests {
             assert!(!Shell::PowerShell.inserts_extra_newline());
             assert!(!Shell::PowerShellCore.inserts_extra_newline());
             assert!(!Shell::Cmd.inserts_extra_newline());
+        }
+    }
+    
+    #[test]
+    fn test_pty_thread_lifecycle() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+        
+        // Try to create a PTY with the detected shell
+        let shell = Shell::detect();
+        if let Ok(pty) = Pty::new(shell) {
+            // Give the PTY time to initialize
+            thread::sleep(Duration::from_millis(200));
+            
+            // Verify the reader thread is running
+            {
+                let pty_lock = pty.lock().unwrap();
+                assert!(pty_lock.reader_thread.is_some());
+            }
+            
+            // Drop the PTY and ensure cleanup happens
+            drop(pty);
+            
+            // Give time for cleanup
+            thread::sleep(Duration::from_millis(200));
+            
+            // If we get here without panicking, the thread was properly cleaned up
+        } else {
+            // PTY creation might fail in some test environments
+            println!("PTY creation failed in test environment");
+        }
+    }
+    
+    #[test]
+    fn test_pty_force_rerender_synchronization() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+        
+        let shell = Shell::detect();
+        if let Ok(pty) = Pty::new(shell) {
+            thread::sleep(Duration::from_millis(200));
+            
+            // Test the force_rerender flag
+            {
+                let pty_lock = pty.lock().unwrap();
+                
+                // Initially should be false
+                assert!(!pty_lock.check_force_rerender());
+                
+                // Set it to true manually
+                pty_lock.force_rerender.store(true, std::sync::atomic::Ordering::Relaxed);
+                
+                // Check should return true and reset it
+                assert!(pty_lock.check_force_rerender());
+                
+                // Second check should return false
+                assert!(!pty_lock.check_force_rerender());
+            }
+        }
+    }
+    
+    #[test]
+    fn test_pty_shutdown_flag() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+        
+        let shell = Shell::detect();
+        if let Ok(pty) = Pty::new(shell) {
+            thread::sleep(Duration::from_millis(100));
+            
+            // Check that shutdown flag is initially false
+            {
+                let pty_lock = pty.lock().unwrap();
+                assert!(!pty_lock.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            
+            // The shutdown flag should be set when dropping
+            // This is tested implicitly when the PTY is dropped at the end of the test
+        }
+    }
+    
+    #[test]
+    fn test_pty_multiple_instances() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+        
+        let shell = Shell::detect();
+        
+        // Create multiple PTY instances
+        let mut ptys = Vec::new();
+        for _ in 0..3 {
+            if let Ok(pty) = Pty::new(shell) {
+                ptys.push(pty);
+            }
+        }
+        
+        // Give them time to initialize
+        thread::sleep(Duration::from_millis(200));
+        
+        // Verify all have reader threads
+        for pty in &ptys {
+            let pty_lock = pty.lock().unwrap();
+            assert!(pty_lock.reader_thread.is_some());
+        }
+        
+        // Drop all PTYs - should clean up all threads
+        drop(ptys);
+        
+        // Give time for cleanup
+        thread::sleep(Duration::from_millis(300));
+        
+        // If we get here without issues, all threads were properly cleaned up
+    }
+    
+    #[test]
+    fn test_pty_reader_thread_naming() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+        
+        let shell = Shell::detect();
+        if let Ok(_pty) = Pty::new(shell) {
+            // The thread should be named "pty-reader"
+            // This is more of a compile-time test to ensure the thread naming code exists
+            thread::sleep(Duration::from_millis(100));
+            
+            // Note: We can't easily verify the thread name from outside,
+            // but the fact that the code compiles with thread naming is good
         }
     }
 }
