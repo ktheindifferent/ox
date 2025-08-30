@@ -10,6 +10,9 @@ mod events;
 #[cfg(not(target_os = "windows"))]
 mod pty;
 mod pty_error;
+#[cfg(target_os = "windows")]
+mod conpty_windows;
+mod pty_cross;
 mod terminal;
 mod ui;
 
