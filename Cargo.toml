@@ -18,6 +18,14 @@ categories = ["text-editors"]
 keywords = ["text-editor", "editor", "terminal", "tui"]
 license = "GPL-2.0"
 
+[lib]
+name = "ox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ox"
+path = "src/main.rs"
+
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/ox", dest = "/usr/bin/ox", mode = "0755" },
