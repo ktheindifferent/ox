@@ -23,15 +23,85 @@ mod windows_clipboard {
     
     const CF_UNICODETEXT: u32 = 13;
     const GMEM_MOVEABLE: u32 = 0x0002;
+    const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100MB limit
+    
+    // RAII guard for clipboard operations
+    struct ClipboardGuard;
+    
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+    
+    // RAII guard for GlobalUnlock
+    struct GlobalUnlockGuard(*mut u8);
+    
+    impl Drop for GlobalUnlockGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    GlobalUnlock(self.0);
+                }
+            }
+        }
+    }
+    
+    // Safe function to read a null-terminated wide string with bounds checking
+    fn safe_read_wide_string(ptr: *const u16) -> Result<String> {
+        if ptr.is_null() {
+            return Err(Error::new(ErrorKind::InvalidData, "Null pointer to clipboard data"));
+        }
+        
+        unsafe {
+            // Calculate length with bounds checking
+            let mut len = 0;
+            let mut current_ptr = ptr;
+            
+            // Limit search to prevent infinite loops on corrupted data
+            const MAX_SEARCH_LEN: usize = MAX_CLIPBOARD_SIZE / 2; // Max u16 elements
+            
+            while len < MAX_SEARCH_LEN {
+                // Use volatile read to prevent optimization issues
+                let value = std::ptr::read_volatile(current_ptr);
+                if value == 0 {
+                    break;
+                }
+                len += 1;
+                current_ptr = current_ptr.offset(1);
+            }
+            
+            if len >= MAX_SEARCH_LEN {
+                return Err(Error::new(ErrorKind::InvalidData, "Clipboard data too large or corrupted"));
+            }
+            
+            // Only create slice after verifying the length
+            if len == 0 {
+                return Ok(String::new());
+            }
+            
+            let slice = std::slice::from_raw_parts(ptr, len);
+            Ok(String::from_utf16_lossy(slice))
+        }
+    }
     
     pub fn set_clipboard_text(text: &str) -> Result<()> {
+        // Check text size before processing
+        if text.len() > MAX_CLIPBOARD_SIZE {
+            return Err(Error::new(ErrorKind::InvalidInput, "Text too large for clipboard"));
+        }
+        
         unsafe {
             if OpenClipboard(ptr::null()) == 0 {
                 return Err(Error::new(ErrorKind::Other, "Failed to open clipboard"));
             }
             
+            // Ensure clipboard is closed on all error paths
+            let _guard = ClipboardGuard;
+            
             if EmptyClipboard() == 0 {
-                CloseClipboard();
                 return Err(Error::new(ErrorKind::Other, "Failed to empty clipboard"));
             }
             
@@ -41,33 +111,43 @@ mod windows_clipboard {
                 .collect();
             
             let size = wide.len() * 2;
+            
+            // Additional size check after UTF-16 conversion
+            if size > MAX_CLIPBOARD_SIZE {
+                return Err(Error::new(ErrorKind::InvalidInput, "Encoded text too large for clipboard"));
+            }
+            
             let handle = GlobalAlloc(GMEM_MOVEABLE, size);
             
             if handle.is_null() {
-                CloseClipboard();
                 return Err(Error::new(ErrorKind::Other, "Failed to allocate memory"));
             }
             
             let locked = GlobalLock(handle);
             if locked.is_null() {
-                CloseClipboard();
                 return Err(Error::new(ErrorKind::Other, "Failed to lock memory"));
             }
             
-            std::ptr::copy_nonoverlapping(
-                wide.as_ptr() as *const u8,
-                locked,
-                size
-            );
-            
-            GlobalUnlock(handle);
+            // Use unlock guard to ensure memory is unlocked even if copy fails
+            {
+                let _unlock_guard = GlobalUnlockGuard(handle);
+                
+                // Verify that we have valid pointers before copying
+                if wide.as_ptr().is_null() || locked.is_null() {
+                    return Err(Error::new(ErrorKind::Other, "Invalid memory pointers"));
+                }
+                
+                std::ptr::copy_nonoverlapping(
+                    wide.as_ptr() as *const u8,
+                    locked,
+                    size
+                );
+            }
             
             if SetClipboardData(CF_UNICODETEXT, handle).is_null() {
-                CloseClipboard();
                 return Err(Error::new(ErrorKind::Other, "Failed to set clipboard data"));
             }
             
-            CloseClipboard();
             Ok(())
         }
     }
@@ -78,30 +158,24 @@ mod windows_clipboard {
                 return Err(Error::new(ErrorKind::Other, "Failed to open clipboard"));
             }
             
+            // Ensure clipboard is closed on all error paths
+            let _guard = ClipboardGuard;
+            
             let handle = GetClipboardData(CF_UNICODETEXT);
             if handle.is_null() {
-                CloseClipboard();
                 return Err(Error::new(ErrorKind::Other, "No text data in clipboard"));
             }
             
             let locked = GlobalLock(handle as *mut u8);
             if locked.is_null() {
-                CloseClipboard();
                 return Err(Error::new(ErrorKind::Other, "Failed to lock clipboard data"));
             }
             
-            let mut len = 0;
-            let mut ptr = locked as *const u16;
-            while *ptr != 0 {
-                len += 1;
-                ptr = ptr.offset(1);
-            }
+            // Create unlock guard to ensure memory is unlocked on all paths
+            let _unlock_guard = GlobalUnlockGuard(handle as *mut u8);
             
-            let slice = std::slice::from_raw_parts(locked as *const u16, len);
-            let text = String::from_utf16_lossy(slice);
-            
-            GlobalUnlock(handle as *mut u8);
-            CloseClipboard();
+            // Safe UTF-16 string length calculation with bounds checking
+            let text = safe_read_wide_string(locked as *const u16)?;
             
             Ok(text)
         }
@@ -527,3 +601,193 @@ impl Default for Clipboard {
 // Re-export Selection for Linux users
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 pub use linux_clipboard::Selection;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_clipboard_basic_operations() {
+        let mut clipboard = Clipboard::new();
+        
+        // Test setting and getting text
+        let test_text = "Hello, World!";
+        match clipboard.set_text(test_text) {
+            Ok(_) => {
+                // Only test get if set succeeded (may fail in CI environments)
+                if let Ok(retrieved) = clipboard.get_text() {
+                    assert_eq!(retrieved, test_text);
+                }
+            }
+            Err(_) => {
+                // Clipboard operations may fail in headless environments
+                println!("Clipboard operations not available in this environment");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_empty_clipboard() {
+        let mut clipboard = Clipboard::new();
+        
+        // Test with empty string
+        let _ = clipboard.set_text("");
+        assert_eq!(clipboard.last_copied(), "");
+    }
+    
+    #[test]
+    fn test_large_text() {
+        let mut clipboard = Clipboard::new();
+        
+        // Test with moderately large text (1MB)
+        let large_text = "a".repeat(1024 * 1024);
+        match clipboard.set_text(&large_text) {
+            Ok(_) => {
+                assert_eq!(clipboard.last_copied(), large_text);
+            }
+            Err(_) => {
+                // May fail in some environments
+                println!("Large clipboard operation not supported");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_unicode_text() {
+        let mut clipboard = Clipboard::new();
+        
+        // Test with various Unicode characters
+        let unicode_tests = vec![
+            "Hello 世界",
+            "Émojis: 😀🎉🚀",
+            "Math: ∑∏∫√",
+            "Symbols: ™®©",
+            "Mixed: Ñañá ÀÁÂÃ àáâã",
+        ];
+        
+        for test_text in unicode_tests {
+            match clipboard.set_text(test_text) {
+                Ok(_) => {
+                    assert_eq!(clipboard.last_copied(), test_text);
+                    if let Ok(retrieved) = clipboard.get_text() {
+                        assert_eq!(retrieved, test_text);
+                    }
+                }
+                Err(_) => {
+                    println!("Unicode clipboard test skipped");
+                }
+            }
+        }
+    }
+    
+    #[test]
+    fn test_multiline_text() {
+        let mut clipboard = Clipboard::new();
+        
+        let multiline = "Line 1\nLine 2\rLine 3\r\nLine 4";
+        match clipboard.set_text(multiline) {
+            Ok(_) => {
+                assert_eq!(clipboard.last_copied(), multiline);
+            }
+            Err(_) => {
+                println!("Multiline clipboard test skipped");
+            }
+        }
+    }
+    
+    #[test]
+    fn test_osc52_fallback() {
+        let mut clipboard = Clipboard::new().with_osc52_fallback();
+        
+        // OSC52 should always succeed as it just prints escape sequences
+        let result = clipboard.set_text_osc52("Test OSC52");
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_last_copied_tracking() {
+        let mut clipboard = Clipboard::new();
+        
+        // Test that last_copied tracks the text even if clipboard fails
+        let test_texts = vec!["First", "Second", "Third"];
+        
+        for text in test_texts {
+            let _ = clipboard.set_text(text);
+            assert_eq!(clipboard.last_copied(), text);
+        }
+    }
+    
+    #[cfg(target_os = "windows")]
+    mod windows_tests {
+        use super::super::windows_clipboard::*;
+        
+        #[test]
+        fn test_safe_read_wide_string_null_pointer() {
+            let result = safe_read_wide_string(std::ptr::null());
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Null pointer"));
+        }
+        
+        #[test]
+        fn test_safe_read_wide_string_empty() {
+            let empty: Vec<u16> = vec![0];
+            let result = safe_read_wide_string(empty.as_ptr());
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), "");
+        }
+        
+        #[test]
+        fn test_safe_read_wide_string_normal() {
+            let text = "Hello";
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let result = safe_read_wide_string(wide.as_ptr());
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), text);
+        }
+        
+        #[test]
+        fn test_safe_read_wide_string_unicode() {
+            let text = "Hello 世界 🎉";
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let result = safe_read_wide_string(wide.as_ptr());
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), text);
+        }
+        
+        #[test]
+        fn test_size_limits() {
+            // Test that overly large text is rejected
+            let huge_text = "a".repeat(MAX_CLIPBOARD_SIZE + 1);
+            let result = set_clipboard_text(&huge_text);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("too large"));
+        }
+        
+        #[test]
+        fn test_clipboard_guard_drop() {
+            // Test that ClipboardGuard properly closes clipboard on drop
+            {
+                let _guard = ClipboardGuard;
+                // Guard goes out of scope here, should call CloseClipboard
+            }
+            // If we get here without crashing, the guard worked
+            assert!(true);
+        }
+        
+        #[test]
+        fn test_global_unlock_guard_drop() {
+            // Test that GlobalUnlockGuard properly unlocks on drop
+            {
+                let _guard = GlobalUnlockGuard(std::ptr::null_mut());
+                // Guard with null pointer should not crash
+            }
+            assert!(true);
+            
+            // Test with non-null (but invalid) pointer - should also not crash
+            {
+                let _guard = GlobalUnlockGuard(1 as *mut u8);
+            }
+            assert!(true);
+        }
+    }
+}

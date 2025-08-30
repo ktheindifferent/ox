@@ -1,12 +1,10 @@
 /// Tools for placing all information about open files into one place
 use crate::editor::{get_absolute_path, Editor, FileType};
-#[cfg(not(target_os = "windows"))]
-use crate::pty::Pty;
+use crate::pty_cross::Pty;
 use crate::Loc;
 use kaolinite::Document;
 use kaolinite::Size;
 use std::ops::Range;
-#[cfg(not(target_os = "windows"))]
 use std::sync::{Arc, Mutex};
 use synoptic::Highlighter;
 
@@ -26,11 +24,7 @@ pub enum FileLayout {
     /// Representing a file tree
     FileTree,
     /// Representing a terminal
-    #[cfg(not(target_os = "windows"))]
     Terminal(Arc<Mutex<Pty>>),
-    #[allow(dead_code)]
-    #[cfg(target_os = "windows")]
-    Terminal(()),
 }
 
 impl Default for FileLayout {
@@ -450,13 +444,8 @@ impl FileLayout {
         match self {
             Self::None | Self::FileTree | Self::Atom(_, _) => false,
             Self::Terminal(term) => {
-                let mut term = term.lock().unwrap();
-                if term.force_rerender {
-                    term.force_rerender = false;
-                    true
-                } else {
-                    false
-                }
+                let term = term.lock().unwrap();
+                term.check_force_rerender()
             }
             Self::SideBySide(layouts) | Self::TopToBottom(layouts) => {
                 for layout in layouts.iter_mut() {
