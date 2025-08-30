@@ -1,8 +1,7 @@
 /// Utilities for configuring and rendering parts of the interface
 use crate::cli::VERSION;
 use crate::editor::{Editor, FileContainer};
-#[cfg(not(target_os = "windows"))]
-use crate::pty::Shell;
+use crate::pty_cross::Shell;
 use crate::Feedback;
 use kaolinite::searching::Searcher;
 use kaolinite::utils::{get_absolute_path, get_file_ext, get_file_name};

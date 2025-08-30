@@ -29,13 +29,10 @@
 //! - Threads are gracefully shut down
 
 use mlua::prelude::*;
-use std::io::{Read, Result, Write};
+use std::io::Result;
 use std::sync::{Arc, Mutex};
 
-#[cfg(not(target_os = "windows"))]
-mod unix_impl;
-#[cfg(target_os = "windows")]
-mod windows_impl;
+// Module implementations are defined inline below
 
 #[cfg(not(target_os = "windows"))]
 use unix_impl as platform;
@@ -396,21 +393,62 @@ mod unix_impl {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::Shell;
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem, MasterPty, Child};
     use std::io::{Result, Error, ErrorKind, Read, Write};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
+    
+    #[derive(Debug, Clone, Copy)]
+    pub enum WindowsSignal {
+        CtrlC,
+        CtrlBreak,
+        CtrlZ,
+    }
+    
+    // Try to use native ConPTY first, fall back to portable-pty if not available
+    enum PtyBackend {
+        ConPty(crate::conpty_windows::ConPty),
+        PortablePty {
+            master: Box<dyn portable_pty::MasterPty + Send>,
+            child: Box<dyn portable_pty::Child + Send + Sync>,
+            reader: Arc<Mutex<Box<dyn Read + Send>>>,
+            writer: Box<dyn Write + Send>,
+        },
+    }
     
     pub struct PtyImpl {
         shell: Shell,
-        master: Box<dyn MasterPty + Send>,
-        child: Box<dyn Child + Send + Sync>,
-        reader: Arc<Mutex<Box<dyn Read + Send>>>,
-        writer: Box<dyn Write + Send>,
+        backend: PtyBackend,
     }
 
     impl PtyImpl {
         pub fn new(shell: Shell) -> Result<Self> {
+            // Try native ConPTY first if available
+            if crate::conpty_windows::ConPty::is_conpty_available() {
+                match Self::create_conpty(&shell) {
+                    Ok(backend) => {
+                        return Ok(Self {
+                            shell,
+                            backend: PtyBackend::ConPty(backend),
+                        });
+                    }
+                    Err(e) => {
+                        // Log the error and fall back to portable-pty
+                        eprintln!("ConPTY creation failed, falling back to portable-pty: {}", e);
+                    }
+                }
+            }
+            
+            // Fall back to portable-pty
+            Self::create_portable_pty(&shell)
+        }
+        
+        fn create_conpty(shell: &Shell) -> Result<crate::conpty_windows::ConPty> {
+            let shell_cmd = Self::build_shell_command(shell);
+            crate::conpty_windows::ConPty::new(&shell_cmd, 24, 80)
+        }
+        
+        fn create_portable_pty(shell: &Shell) -> Result<Self> {
             // Get the native PTY system (ConPTY on Windows 10+)
             let pty_system = native_pty_system();
             
@@ -435,9 +473,6 @@ mod windows_impl {
                 Shell::PowerShell | Shell::PowerShellCore => {
                     cmd.arg("-NoLogo");
                     cmd.arg("-NoProfile");
-                    cmd.arg("-NonInteractive");
-                    cmd.arg("-Command");
-                    cmd.arg("-");
                 }
                 Shell::Cmd => {
                     // cmd.exe doesn't need special flags for PTY mode
@@ -462,123 +497,183 @@ mod windows_impl {
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to get writer: {}", e)))?;
             
             Ok(Self {
-                shell,
-                master: pair.master,
-                child,
-                reader: Arc::new(Mutex::new(reader)),
-                writer,
+                shell: *shell,
+                backend: PtyBackend::PortablePty {
+                    master: pair.master,
+                    child,
+                    reader: Arc::new(Mutex::new(reader)),
+                    writer,
+                },
             })
         }
+        
+        fn build_shell_command(shell: &Shell) -> String {
+            match shell {
+                Shell::PowerShell => "powershell.exe -NoLogo -NoProfile".to_string(),
+                Shell::PowerShellCore => "pwsh.exe -NoLogo -NoProfile".to_string(),
+                Shell::Cmd => "cmd.exe".to_string(),
+                _ => shell.command().to_string(),
+            }
+        }
 
-        pub fn set_echo(&mut self, _echo: bool) -> Result<()> {
-            // ConPTY handles echo internally, so this is a no-op on Windows
+        pub fn set_echo(&mut self, echo: bool) -> Result<()> {
+            // ConPTY handles echo internally, so this is mostly a no-op on Windows
             // The terminal emulation layer manages echo behavior
-            Ok(())
+            match &mut self.backend {
+                PtyBackend::ConPty(_) => Ok(()), // ConPTY handles echo internally
+                PtyBackend::PortablePty { .. } => Ok(()), // portable-pty also handles this
+            }
         }
 
         pub fn write_input(&mut self, input: &str) -> Result<()> {
-            // Check if the child process is still alive before writing
-            if !self.is_alive() {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "Cannot write to PTY: child process has terminated"
-                ));
-            }
-            
-            // Write the input and handle potential errors
-            match self.writer.write_all(input.as_bytes()) {
-                Ok(_) => {
-                    // Flush to ensure data is sent immediately
-                    self.writer.flush()?;
-                    Ok(())
+            match &mut self.backend {
+                PtyBackend::ConPty(conpty) => {
+                    conpty.write(input.as_bytes())
                 }
-                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                    // The pipe is broken, likely because the child exited
-                    Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        format!("PTY write failed: {}", e)
-                    ))
-                }
-                Err(e) => Err(e),
-            }
-        }
-
-        pub fn read_output(&mut self) -> Result<String> {
-            let mut buffer = vec![0u8; 10240];
-            let mut reader = self.reader.lock().unwrap();
-            
-            // Set a timeout for reading to avoid blocking indefinitely
-            // Note: portable-pty handles non-blocking I/O internally
-            match reader.read(&mut buffer) {
-                Ok(n) if n > 0 => {
-                    Ok(String::from_utf8_lossy(&buffer[..n]).to_string())
-                }
-                Ok(_) => Ok(String::new()),
-                Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(String::new()),
-                Err(e) => Err(e),
-            }
-        }
-
-        pub fn try_read_output(&mut self) -> Result<String> {
-            // Check if the child process is still alive
-            if !self.is_alive() {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "PTY child process has terminated"
-                ));
-            }
-            
-            let mut buffer = vec![0u8; 10240];
-            let reader = self.reader.clone();
-            
-            // Try to read without blocking
-            let reader_guard = reader.try_lock();
-            match reader_guard {
-                Ok(mut reader) => {
-                    // Attempt non-blocking read
-                    match reader.read(&mut buffer) {
-                        Ok(n) if n > 0 => {
-                            // Validate UTF-8 and handle invalid sequences gracefully
-                            Ok(String::from_utf8_lossy(&buffer[..n]).to_string())
+                PtyBackend::PortablePty { writer, child, .. } => {
+                    // Check if the child process is still alive before writing
+                    if child.try_wait().is_some() {
+                        return Err(Error::new(
+                            ErrorKind::BrokenPipe,
+                            "Cannot write to PTY: child process has terminated"
+                        ));
+                    }
+                    
+                    // Write the input and handle potential errors
+                    match writer.write_all(input.as_bytes()) {
+                        Ok(_) => {
+                            // Flush to ensure data is sent immediately
+                            writer.flush()?;
+                            Ok(())
                         }
-                        Ok(_) => Ok(String::new()),
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(String::new()),
-                        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                            // Child process may have exited
-                            if !self.is_alive() {
-                                Err(Error::new(ErrorKind::BrokenPipe, "PTY closed"))
-                            } else {
-                                Ok(String::new())
-                            }
+                        Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                            Err(Error::new(
+                                ErrorKind::BrokenPipe,
+                                format!("PTY write failed: {}", e)
+                            ))
                         }
                         Err(e) => Err(e),
                     }
                 }
-                Err(_) => {
-                    // Reader is locked, return empty string
-                    Ok(String::new())
+            }
+        }
+
+        pub fn read_output(&mut self) -> Result<String> {
+            match &mut self.backend {
+                PtyBackend::ConPty(conpty) => {
+                    let data = conpty.read()?;
+                    Ok(String::from_utf8_lossy(&data).to_string())
+                }
+                PtyBackend::PortablePty { reader, .. } => {
+                    let mut buffer = vec![0u8; 10240];
+                    let mut reader = reader.lock().unwrap();
+                    
+                    match reader.read(&mut buffer) {
+                        Ok(n) if n > 0 => {
+                            Ok(String::from_utf8_lossy(&buffer[..n]).to_string())
+                        }
+                        Ok(_) => Ok(String::new()),
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(String::new()),
+                        Err(e) => Err(e),
+                    }
+                }
+            }
+        }
+
+        pub fn try_read_output(&mut self) -> Result<String> {
+            match &mut self.backend {
+                PtyBackend::ConPty(conpty) => {
+                    let data = conpty.try_read()?;
+                    Ok(String::from_utf8_lossy(&data).to_string())
+                }
+                PtyBackend::PortablePty { reader, child, .. } => {
+                    // Check if the child process is still alive
+                    if child.try_wait().is_some() {
+                        return Err(Error::new(
+                            ErrorKind::BrokenPipe,
+                            "PTY child process has terminated"
+                        ));
+                    }
+                    
+                    let mut buffer = vec![0u8; 10240];
+                    let reader = reader.clone();
+                    
+                    // Try to read without blocking
+                    let reader_guard = reader.try_lock();
+                    match reader_guard {
+                        Ok(mut reader) => {
+                            match reader.read(&mut buffer) {
+                                Ok(n) if n > 0 => {
+                                    Ok(String::from_utf8_lossy(&buffer[..n]).to_string())
+                                }
+                                Ok(_) => Ok(String::new()),
+                                Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(String::new()),
+                                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                                    if child.try_wait().is_some() {
+                                        Err(Error::new(ErrorKind::BrokenPipe, "PTY closed"))
+                                    } else {
+                                        Ok(String::new())
+                                    }
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        Err(_) => Ok(String::new()),
+                    }
                 }
             }
         }
         
         pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-            let size = PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            };
-            
-            self.master
-                .resize(size)
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to resize PTY: {}", e)))?;
-            
-            Ok(())
+            match &mut self.backend {
+                PtyBackend::ConPty(conpty) => {
+                    conpty.resize(rows, cols)
+                }
+                PtyBackend::PortablePty { master, .. } => {
+                    let size = PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    };
+                    
+                    master
+                        .resize(size)
+                        .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to resize PTY: {}", e)))?;
+                    
+                    Ok(())
+                }
+            }
         }
         
         pub fn is_alive(&self) -> bool {
-            // Check if the child process is still running
-            self.child.try_wait().is_none()
+            match &self.backend {
+                PtyBackend::ConPty(conpty) => conpty.is_alive(),
+                PtyBackend::PortablePty { child, .. } => child.try_wait().is_none(),
+            }
+        }
+        
+        pub fn send_signal(&mut self, signal: WindowsSignal) -> Result<()> {
+            match &mut self.backend {
+                PtyBackend::ConPty(conpty) => {
+                    let conpty_signal = match signal {
+                        WindowsSignal::CtrlC => crate::conpty_windows::ConPtySignal::CtrlC,
+                        WindowsSignal::CtrlBreak => crate::conpty_windows::ConPtySignal::CtrlBreak,
+                        WindowsSignal::CtrlZ => crate::conpty_windows::ConPtySignal::CtrlZ,
+                    };
+                    conpty.send_signal(conpty_signal)
+                }
+                PtyBackend::PortablePty { writer, .. } => {
+                    // Send the signal as a control character
+                    let signal_char = match signal {
+                        WindowsSignal::CtrlC => b"\x03",
+                        WindowsSignal::CtrlBreak => b"\x03",
+                        WindowsSignal::CtrlZ => b"\x1a",
+                    };
+                    writer.write_all(signal_char)?;
+                    writer.flush()
+                }
+            }
         }
     }
 
@@ -593,30 +688,36 @@ mod windows_impl {
     
     impl Drop for PtyImpl {
         fn drop(&mut self) {
-            // Ensure the child process is terminated when the PTY is dropped
-            // First try a graceful shutdown
-            if self.is_alive() {
-                // Send EOF to the writer to signal the shell to exit
-                // This is more graceful than killing the process directly
-                if let Shell::Cmd = self.shell {
-                    let _ = self.writer.write_all(b"exit\r\n");
-                } else {
-                    // For PowerShell variants
-                    let _ = self.writer.write_all(b"exit\r\n");
+            match &mut self.backend {
+                PtyBackend::ConPty(_) => {
+                    // ConPty handles cleanup in its own Drop implementation
                 }
-                let _ = self.writer.flush();
-                
-                // Give the process a moment to exit gracefully
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                
-                // If still alive, force kill
-                if self.is_alive() {
-                    let _ = self.child.kill();
+                PtyBackend::PortablePty { child, writer, .. } => {
+                    // Ensure the child process is terminated when the PTY is dropped
+                    // First try a graceful shutdown
+                    if child.try_wait().is_none() {
+                        // Send EOF to the writer to signal the shell to exit
+                        let exit_cmd = match self.shell {
+                            Shell::Cmd => b"exit\r\n",
+                            Shell::PowerShell | Shell::PowerShellCore => b"exit\r\n",
+                            _ => b"exit\n",
+                        };
+                        let _ = writer.write_all(exit_cmd);
+                        let _ = writer.flush();
+                        
+                        // Give the process a moment to exit gracefully
+                        std::thread::sleep(Duration::from_millis(100));
+                        
+                        // If still alive, force kill
+                        if child.try_wait().is_none() {
+                            let _ = child.kill();
+                        }
+                    }
+                    
+                    // Wait for the child to fully exit to avoid zombie processes
+                    let _ = child.wait();
                 }
             }
-            
-            // Wait for the child to fully exit to avoid zombie processes
-            let _ = self.child.wait();
         }
     }
 }
