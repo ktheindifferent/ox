@@ -206,6 +206,7 @@ impl FromLua for Shell {
     }
 }
 
+#[derive(Debug)]
 pub struct Pty {
     inner: platform::PtyImpl,
     pub output: String,
