@@ -450,13 +450,8 @@ impl FileLayout {
         match self {
             Self::None | Self::FileTree | Self::Atom(_, _) => false,
             Self::Terminal(term) => {
-                let mut term = term.lock().unwrap();
-                if term.force_rerender {
-                    term.force_rerender = false;
-                    true
-                } else {
-                    false
-                }
+                let term = term.lock().unwrap();
+                term.check_force_rerender()
             }
             Self::SideBySide(layouts) | Self::TopToBottom(layouts) => {
                 for layout in layouts.iter_mut() {
