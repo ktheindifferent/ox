@@ -145,107 +145,258 @@ mod macos_clipboard {
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 mod linux_clipboard {
     use std::io::{Result, Error, ErrorKind};
-    use std::process::Command;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    use std::sync::OnceLock;
+    use std::env;
     
-    fn detect_clipboard_tool() -> Option<&'static str> {
-        // Try different clipboard tools in order of preference
-        for tool in &["xclip", "xsel", "wl-copy"] {
-            if Command::new("which")
-                .arg(tool)
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
-            {
-                return Some(tool);
-            }
-        }
-        None
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(super) enum SessionType {
+        Wayland,
+        X11,
+        Unknown,
     }
     
-    pub fn set_clipboard_text(text: &str) -> Result<()> {
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum ClipboardTool {
+        WlClipboard,  // wl-copy/wl-paste for Wayland
+        Xclip,        // xclip for X11
+        Xsel,         // xsel for X11
+    }
+    
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum Selection {
+        Clipboard,
+        Primary,
+    }
+    
+    impl Default for Selection {
+        fn default() -> Self {
+            Selection::Clipboard
+        }
+    }
+    
+    // Cache for detected clipboard tool
+    static CLIPBOARD_TOOL: OnceLock<Option<ClipboardTool>> = OnceLock::new();
+    static SESSION_TYPE: OnceLock<SessionType> = OnceLock::new();
+    
+    pub(super) fn detect_session_type() -> SessionType {
+        *SESSION_TYPE.get_or_init(|| {
+            // Check for Wayland session
+            if env::var("WAYLAND_DISPLAY").is_ok() {
+                return SessionType::Wayland;
+            }
+            
+            // Check XDG_SESSION_TYPE
+            if let Ok(session_type) = env::var("XDG_SESSION_TYPE") {
+                match session_type.to_lowercase().as_str() {
+                    "wayland" => return SessionType::Wayland,
+                    "x11" => return SessionType::X11,
+                    _ => {}
+                }
+            }
+            
+            // Check for X11 display
+            if env::var("DISPLAY").is_ok() {
+                return SessionType::X11;
+            }
+            
+            SessionType::Unknown
+        })
+    }
+    
+    fn check_tool_availability(tool: &str) -> bool {
+        Command::new("which")
+            .arg(tool)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    
+    pub(super) fn detect_clipboard_tool() -> Option<ClipboardTool> {
+        *CLIPBOARD_TOOL.get_or_init(|| {
+            let session = detect_session_type();
+            
+            // Prefer tools based on session type
+            match session {
+                SessionType::Wayland => {
+                    // For Wayland, prefer wl-clipboard
+                    if check_tool_availability("wl-copy") && check_tool_availability("wl-paste") {
+                        return Some(ClipboardTool::WlClipboard);
+                    }
+                    // Fall back to X11 tools (might work through XWayland)
+                    if check_tool_availability("xclip") {
+                        return Some(ClipboardTool::Xclip);
+                    }
+                    if check_tool_availability("xsel") {
+                        return Some(ClipboardTool::Xsel);
+                    }
+                }
+                SessionType::X11 | SessionType::Unknown => {
+                    // For X11 or unknown, prefer X11 tools
+                    if check_tool_availability("xclip") {
+                        return Some(ClipboardTool::Xclip);
+                    }
+                    if check_tool_availability("xsel") {
+                        return Some(ClipboardTool::Xsel);
+                    }
+                    // Try Wayland tools as last resort
+                    if check_tool_availability("wl-copy") && check_tool_availability("wl-paste") {
+                        return Some(ClipboardTool::WlClipboard);
+                    }
+                }
+            }
+            
+            None
+        })
+    }
+    
+    fn execute_with_timeout(mut cmd: Command, input: Option<&[u8]>, timeout: Duration) -> Result<Vec<u8>> {
+        use std::io::Write;
+        use std::thread;
+        use std::sync::mpsc;
+        
+        if let Some(_data) = input {
+            cmd.stdin(Stdio::piped());
+        }
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        
+        let mut child = cmd.spawn()
+            .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to spawn process: {}", e)))?;
+        
+        // Write input if provided
+        if let Some(data) = input {
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(data)
+                    .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to write to stdin: {}", e)))?;
+            }
+        }
+        
+        // Set up timeout
+        let (tx, rx) = mpsc::channel();
+        let _child_id = child.id();
+        
+        thread::spawn(move || {
+            thread::sleep(timeout);
+            tx.send(()).ok();
+        });
+        
+        // Wait for process or timeout
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        let output = child.wait_with_output()
+                            .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to get output: {}", e)))?;
+                        return Ok(output.stdout);
+                    } else {
+                        return Err(Error::new(ErrorKind::Other, "Command failed"));
+                    }
+                }
+                Ok(None) => {
+                    // Still running, check for timeout
+                    if rx.try_recv().is_ok() {
+                        // Timeout occurred, kill the process
+                        child.kill().ok();
+                        return Err(Error::new(ErrorKind::TimedOut, "Clipboard operation timed out"));
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    return Err(Error::new(ErrorKind::Other, format!("Failed to wait for process: {}", e)));
+                }
+            }
+        }
+    }
+    
+    pub fn set_clipboard_text_with_selection(text: &str, selection: Selection) -> Result<()> {
         let tool = detect_clipboard_tool()
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "No clipboard tool found"))?;
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, 
+                "No clipboard tool found. Install xclip, xsel, or wl-clipboard"))?;
+        
+        let timeout = Duration::from_secs(2);
+        
+        match tool {
+            ClipboardTool::Xclip => {
+                let mut cmd = Command::new("xclip");
+                cmd.arg("-selection");
+                match selection {
+                    Selection::Clipboard => cmd.arg("clipboard"),
+                    Selection::Primary => cmd.arg("primary"),
+                };
+                execute_with_timeout(cmd, Some(text.as_bytes()), timeout)?;
+            }
+            ClipboardTool::Xsel => {
+                let mut cmd = Command::new("xsel");
+                match selection {
+                    Selection::Clipboard => cmd.arg("--clipboard"),
+                    Selection::Primary => cmd.arg("--primary"),
+                };
+                cmd.arg("--input");
+                execute_with_timeout(cmd, Some(text.as_bytes()), timeout)?;
+            }
+            ClipboardTool::WlClipboard => {
+                let mut cmd = Command::new("wl-copy");
+                if selection == Selection::Primary {
+                    cmd.arg("--primary");
+                }
+                execute_with_timeout(cmd, Some(text.as_bytes()), timeout)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    pub fn get_clipboard_text_with_selection(selection: Selection) -> Result<String> {
+        let tool = detect_clipboard_tool()
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, 
+                "No clipboard tool found. Install xclip, xsel, or wl-clipboard"))?;
+        
+        let timeout = Duration::from_secs(2);
         
         let output = match tool {
-            "xclip" => {
-                Command::new("xclip")
-                    .arg("-selection")
-                    .arg("clipboard")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .and_then(|mut child| {
-                        use std::io::Write;
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            stdin.write_all(text.as_bytes())?;
-                        }
-                        child.wait()
-                    })
+            ClipboardTool::Xclip => {
+                let mut cmd = Command::new("xclip");
+                cmd.arg("-selection");
+                match selection {
+                    Selection::Clipboard => cmd.arg("clipboard"),
+                    Selection::Primary => cmd.arg("primary"),
+                };
+                cmd.arg("-out");
+                execute_with_timeout(cmd, None, timeout)?
             }
-            "xsel" => {
-                Command::new("xsel")
-                    .arg("--clipboard")
-                    .arg("--input")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .and_then(|mut child| {
-                        use std::io::Write;
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            stdin.write_all(text.as_bytes())?;
-                        }
-                        child.wait()
-                    })
+            ClipboardTool::Xsel => {
+                let mut cmd = Command::new("xsel");
+                match selection {
+                    Selection::Clipboard => cmd.arg("--clipboard"),
+                    Selection::Primary => cmd.arg("--primary"),
+                };
+                cmd.arg("--output");
+                execute_with_timeout(cmd, None, timeout)?
             }
-            "wl-copy" => {
-                Command::new("wl-copy")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .and_then(|mut child| {
-                        use std::io::Write;
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            stdin.write_all(text.as_bytes())?;
-                        }
-                        child.wait()
-                    })
+            ClipboardTool::WlClipboard => {
+                let mut cmd = Command::new("wl-paste");
+                if selection == Selection::Primary {
+                    cmd.arg("--primary");
+                }
+                cmd.arg("--no-newline");
+                execute_with_timeout(cmd, None, timeout)?
             }
-            _ => return Err(Error::new(ErrorKind::Other, "Unknown clipboard tool"))
         };
         
-        match output {
-            Ok(status) if status.success() => Ok(()),
-            _ => Err(Error::new(ErrorKind::Other, "Failed to copy to clipboard"))
-        }
+        Ok(String::from_utf8_lossy(&output).to_string())
+    }
+    
+    // Public API maintaining backward compatibility
+    pub fn set_clipboard_text(text: &str) -> Result<()> {
+        set_clipboard_text_with_selection(text, Selection::default())
     }
     
     pub fn get_clipboard_text() -> Result<String> {
-        let tool = detect_clipboard_tool()
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, "No clipboard tool found"))?;
-        
-        let output = match tool {
-            "xclip" => {
-                Command::new("xclip")
-                    .arg("-selection")
-                    .arg("clipboard")
-                    .arg("-out")
-                    .output()
-            }
-            "xsel" => {
-                Command::new("xsel")
-                    .arg("--clipboard")
-                    .arg("--output")
-                    .output()
-            }
-            "wl-paste" => {
-                Command::new("wl-paste")
-                    .output()
-            }
-            _ => return Err(Error::new(ErrorKind::Other, "Unknown clipboard tool"))
-        }?;
-        
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Err(Error::new(ErrorKind::Other, "Failed to paste from clipboard"))
-        }
+        get_clipboard_text_with_selection(Selection::default())
     }
 }
 
@@ -254,6 +405,8 @@ pub struct Clipboard {
     // Fallback for OSC 52 sequence support
     use_osc52: bool,
     last_copy: String,
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    selection: linux_clipboard::Selection,
 }
 
 impl Clipboard {
@@ -261,6 +414,8 @@ impl Clipboard {
         Self {
             use_osc52: false,
             last_copy: String::new(),
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            selection: linux_clipboard::Selection::default(),
         }
     }
     
@@ -269,7 +424,14 @@ impl Clipboard {
         self
     }
     
-    /// Copy text to clipboard
+    /// Set the selection type (Linux only, ignored on other platforms)
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    pub fn with_selection(mut self, selection: linux_clipboard::Selection) -> Self {
+        self.selection = selection;
+        self
+    }
+    
+    /// Copy text to clipboard with automatic fallback chain
     pub fn set_text(&mut self, text: &str) -> Result<()> {
         self.last_copy = text.to_string();
         
@@ -282,39 +444,77 @@ impl Clipboard {
             { macos_clipboard::set_clipboard_text(text) }
             
             #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-            { linux_clipboard::set_clipboard_text(text) }
+            { linux_clipboard::set_clipboard_text_with_selection(text, self.selection) }
         };
         
         // Fall back to OSC 52 if native fails and fallback is enabled
-        if result.is_err() && self.use_osc52 {
-            self.set_text_osc52(text)
-        } else {
-            result
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) if self.use_osc52 => {
+                // Log the native error for debugging
+                eprintln!("Native clipboard failed: {}. Falling back to OSC 52.", e);
+                self.set_text_osc52(text)
+            }
+            Err(e) => Err(e)
         }
     }
     
     /// Get text from clipboard
     pub fn get_text(&self) -> Result<String> {
-        #[cfg(target_os = "windows")]
-        { windows_clipboard::get_clipboard_text() }
+        let result = {
+            #[cfg(target_os = "windows")]
+            { windows_clipboard::get_clipboard_text() }
+            
+            #[cfg(target_os = "macos")]
+            { macos_clipboard::get_clipboard_text() }
+            
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            { linux_clipboard::get_clipboard_text_with_selection(self.selection) }
+        };
         
-        #[cfg(target_os = "macos")]
-        { macos_clipboard::get_clipboard_text() }
-        
-        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-        { linux_clipboard::get_clipboard_text() }
+        // If native clipboard fails and we have a last_copy, return that as fallback
+        match result {
+            Ok(text) => Ok(text),
+            Err(e) if self.use_osc52 && !self.last_copy.is_empty() => {
+                eprintln!("Native clipboard read failed: {}. Returning last copied text.", e);
+                Ok(self.last_copy.clone())
+            }
+            Err(e) => Err(e)
+        }
     }
     
     /// Copy using OSC 52 escape sequence (terminal clipboard)
     pub fn set_text_osc52(&self, text: &str) -> Result<()> {
         use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+        // Use both OSC 52 formats for better compatibility
         print!("\x1b]52;c;{}\x1b\\", BASE64_STANDARD.encode(text));
+        // Also send the version with BEL terminator for older terminals
+        print!("\x1b]52;c;{}\x07", BASE64_STANDARD.encode(text));
         Ok(())
     }
     
     /// Get the last copied text (from this instance)
     pub fn last_copied(&self) -> &str {
         &self.last_copy
+    }
+    
+    /// Get information about clipboard support (for debugging)
+    pub fn get_clipboard_info(&self) -> String {
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            let session = linux_clipboard::detect_session_type();
+            let tool = linux_clipboard::detect_clipboard_tool();
+            format!("Linux session: {:?}, Tool: {:?}, OSC52 fallback: {}", 
+                    session, tool, self.use_osc52)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            format!("Windows native clipboard, OSC52 fallback: {}", self.use_osc52)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            format!("macOS pbcopy/pbpaste, OSC52 fallback: {}", self.use_osc52)
+        }
     }
 }
 
@@ -323,3 +523,7 @@ impl Default for Clipboard {
         Self::new()
     }
 }
+
+// Re-export Selection for Linux users
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+pub use linux_clipboard::Selection;
