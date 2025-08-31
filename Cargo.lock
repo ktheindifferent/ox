@@ -475,6 +475,7 @@ dependencies = [
  "shellexpand",
  "synoptic",
  "tempfile",
+ "which",
  "winapi",
  "windows",
 ]
