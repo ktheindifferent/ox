@@ -1,6 +1,8 @@
 //! Cross-platform clipboard support
 
-use std::io::Result;
+use log::{debug, error, info, warn};
+use std::fmt;
+use std::io::{Error as IoError, ErrorKind, Result};
 
 #[cfg(target_os = "windows")]
 mod windows_clipboard {
@@ -474,6 +476,103 @@ mod linux_clipboard {
     }
 }
 
+/// Clipboard error types
+#[derive(Debug)]
+pub enum ClipboardError {
+    /// Native clipboard operation failed
+    NativeClipboardFailed(String),
+    /// Clipboard tool not found (Linux)
+    ToolNotFound(String),
+    /// Clipboard operation timed out
+    Timeout,
+    /// Clipboard is locked by another process
+    Locked,
+    /// Text too large for clipboard
+    TextTooLarge(usize),
+    /// Invalid clipboard data format
+    InvalidFormat(String),
+    /// Platform-specific error
+    PlatformError(String),
+    /// Fallback to OSC52 failed
+    OSC52Failed(String),
+    /// IO Error
+    IoError(IoError),
+}
+
+impl fmt::Display for ClipboardError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClipboardError::NativeClipboardFailed(msg) => {
+                write!(f, "Native clipboard operation failed: {}", msg)
+            }
+            ClipboardError::ToolNotFound(msg) => {
+                write!(f, "Clipboard tool not found: {}", msg)
+            }
+            ClipboardError::Timeout => write!(f, "Clipboard operation timed out"),
+            ClipboardError::Locked => write!(f, "Clipboard is locked by another process"),
+            ClipboardError::TextTooLarge(size) => {
+                write!(f, "Text too large for clipboard: {} bytes", size)
+            }
+            ClipboardError::InvalidFormat(msg) => {
+                write!(f, "Invalid clipboard data format: {}", msg)
+            }
+            ClipboardError::PlatformError(msg) => {
+                write!(f, "Platform-specific clipboard error: {}", msg)
+            }
+            ClipboardError::OSC52Failed(msg) => {
+                write!(f, "OSC52 clipboard operation failed: {}", msg)
+            }
+            ClipboardError::IoError(err) => write!(f, "IO error: {}", err),
+        }
+    }
+}
+
+impl std::error::Error for ClipboardError {}
+
+impl From<IoError> for ClipboardError {
+    fn from(error: IoError) -> Self {
+        ClipboardError::IoError(error)
+    }
+}
+
+impl From<ClipboardError> for IoError {
+    fn from(error: ClipboardError) -> Self {
+        match error {
+            ClipboardError::IoError(io_err) => io_err,
+            ClipboardError::Timeout => IoError::new(ErrorKind::TimedOut, error.to_string()),
+            ClipboardError::Locked => IoError::new(ErrorKind::WouldBlock, error.to_string()),
+            ClipboardError::TextTooLarge(_) => IoError::new(ErrorKind::InvalidInput, error.to_string()),
+            _ => IoError::new(ErrorKind::Other, error.to_string()),
+        }
+    }
+}
+
+/// Represents the method used for clipboard operations
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClipboardMethod {
+    /// Native system clipboard
+    Native,
+    /// OSC 52 terminal escape sequence
+    OSC52,
+    /// Cached text (fallback when clipboard is unavailable)
+    Cached,
+}
+
+/// Status of the clipboard system
+#[derive(Debug, Clone)]
+pub struct ClipboardStatus {
+    /// Current method being used
+    pub method: ClipboardMethod,
+    /// Whether the native clipboard is available
+    pub native_available: bool,
+    /// Whether OSC52 is enabled
+    pub osc52_enabled: bool,
+    /// Last error if any
+    pub last_error: Option<String>,
+    /// Platform information
+    pub platform_info: String,
+}
+
 /// Cross-platform clipboard interface
 pub struct Clipboard {
     // Fallback for OSC 52 sequence support
@@ -481,6 +580,14 @@ pub struct Clipboard {
     last_copy: String,
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     selection: linux_clipboard::Selection,
+    /// Track the current clipboard method
+    pub current_method: ClipboardMethod,
+    /// Track the last error
+    last_error: Option<ClipboardError>,
+    /// Retry count for transient failures
+    max_retries: u32,
+    /// Enable verbose logging
+    verbose_logging: bool,
 }
 
 impl Clipboard {
@@ -490,11 +597,27 @@ impl Clipboard {
             last_copy: String::new(),
             #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
             selection: linux_clipboard::Selection::default(),
+            current_method: ClipboardMethod::Native,
+            last_error: None,
+            max_retries: 3,
+            verbose_logging: false,
         }
     }
     
     pub fn with_osc52_fallback(mut self) -> Self {
         self.use_osc52 = true;
+        self
+    }
+    
+    /// Set the maximum number of retries for transient failures
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = retries;
+        self
+    }
+    
+    /// Enable verbose logging
+    pub fn with_verbose_logging(mut self) -> Self {
+        self.verbose_logging = true;
         self
     }
     
@@ -505,55 +628,133 @@ impl Clipboard {
         self
     }
     
-    /// Copy text to clipboard with automatic fallback chain
+    /// Copy text to clipboard with automatic fallback chain and retry logic
     pub fn set_text(&mut self, text: &str) -> Result<()> {
         self.last_copy = text.to_string();
         
-        // Try native clipboard first
-        let result = {
-            #[cfg(target_os = "windows")]
-            { windows_clipboard::set_clipboard_text(text) }
+        // Try native clipboard first with retries
+        let mut attempts = 0;
+        let mut last_native_error = None;
+        
+        while attempts < self.max_retries {
+            let result = {
+                #[cfg(target_os = "windows")]
+                { windows_clipboard::set_clipboard_text(text) }
+                
+                #[cfg(target_os = "macos")]
+                { macos_clipboard::set_clipboard_text(text) }
+                
+                #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+                { linux_clipboard::set_clipboard_text_with_selection(text, self.selection) }
+            };
             
-            #[cfg(target_os = "macos")]
-            { macos_clipboard::set_clipboard_text(text) }
-            
-            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-            { linux_clipboard::set_clipboard_text_with_selection(text, self.selection) }
-        };
+            match result {
+                Ok(_) => {
+                    self.current_method = ClipboardMethod::Native;
+                    self.last_error = None;
+                    if self.verbose_logging {
+                        info!("Successfully copied text to native clipboard (attempt {})", attempts + 1);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    attempts += 1;
+                    last_native_error = Some(e);
+                    
+                    if self.verbose_logging {
+                        debug!("Native clipboard attempt {} failed: {}", attempts, last_native_error.as_ref().unwrap());
+                    }
+                    
+                    // Don't retry for certain errors
+                    if let Some(err_str) = last_native_error.as_ref().map(|e| e.to_string()) {
+                        if err_str.contains("too large") || err_str.contains("No clipboard tool found") {
+                            break;
+                        }
+                    }
+                    
+                    if attempts < self.max_retries {
+                        std::thread::sleep(std::time::Duration::from_millis(50 * attempts as u64));
+                    }
+                }
+            }
+        }
         
         // Fall back to OSC 52 if native fails and fallback is enabled
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) if self.use_osc52 => {
-                // Log the native error for debugging
-                eprintln!("Native clipboard failed: {}. Falling back to OSC 52.", e);
-                self.set_text_osc52(text)
+        if self.use_osc52 {
+            let native_err = last_native_error.unwrap();
+            warn!("Native clipboard failed after {} attempts: {}. Falling back to OSC 52.", attempts, native_err);
+            
+            match self.set_text_osc52(text) {
+                Ok(_) => {
+                    self.current_method = ClipboardMethod::OSC52;
+                    self.last_error = Some(ClipboardError::NativeClipboardFailed(native_err.to_string()));
+                    Ok(())
+                }
+                Err(osc_err) => {
+                    error!("OSC52 fallback also failed: {}", osc_err);
+                    self.last_error = Some(ClipboardError::OSC52Failed(osc_err.to_string()));
+                    Err(osc_err)
+                }
             }
-            Err(e) => Err(e)
+        } else {
+            let err = last_native_error.unwrap();
+            self.last_error = Some(ClipboardError::NativeClipboardFailed(err.to_string()));
+            Err(err)
         }
     }
     
-    /// Get text from clipboard
-    pub fn get_text(&self) -> Result<String> {
-        let result = {
-            #[cfg(target_os = "windows")]
-            { windows_clipboard::get_clipboard_text() }
+    /// Get text from clipboard with retry logic
+    pub fn get_text(&mut self) -> Result<String> {
+        let mut attempts = 0;
+        let mut last_error = None;
+        
+        while attempts < self.max_retries {
+            let result = {
+                #[cfg(target_os = "windows")]
+                { windows_clipboard::get_clipboard_text() }
+                
+                #[cfg(target_os = "macos")]
+                { macos_clipboard::get_clipboard_text() }
+                
+                #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+                { linux_clipboard::get_clipboard_text_with_selection(self.selection) }
+            };
             
-            #[cfg(target_os = "macos")]
-            { macos_clipboard::get_clipboard_text() }
-            
-            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-            { linux_clipboard::get_clipboard_text_with_selection(self.selection) }
-        };
+            match result {
+                Ok(text) => {
+                    self.current_method = ClipboardMethod::Native;
+                    self.last_error = None;
+                    if self.verbose_logging {
+                        info!("Successfully read text from native clipboard (attempt {})", attempts + 1);
+                    }
+                    return Ok(text);
+                }
+                Err(e) => {
+                    attempts += 1;
+                    last_error = Some(e);
+                    
+                    if self.verbose_logging {
+                        debug!("Native clipboard read attempt {} failed: {}", attempts, last_error.as_ref().unwrap());
+                    }
+                    
+                    if attempts < self.max_retries {
+                        std::thread::sleep(std::time::Duration::from_millis(50 * attempts as u64));
+                    }
+                }
+            }
+        }
         
         // If native clipboard fails and we have a last_copy, return that as fallback
-        match result {
-            Ok(text) => Ok(text),
-            Err(e) if self.use_osc52 && !self.last_copy.is_empty() => {
-                eprintln!("Native clipboard read failed: {}. Returning last copied text.", e);
-                Ok(self.last_copy.clone())
-            }
-            Err(e) => Err(e)
+        if self.use_osc52 && !self.last_copy.is_empty() {
+            let err = last_error.unwrap();
+            warn!("Native clipboard read failed after {} attempts: {}. Returning cached text.", attempts, err);
+            self.current_method = ClipboardMethod::Cached;
+            self.last_error = Some(ClipboardError::NativeClipboardFailed(err.to_string()));
+            Ok(self.last_copy.clone())
+        } else {
+            let err = last_error.unwrap();
+            self.last_error = Some(ClipboardError::NativeClipboardFailed(err.to_string()));
+            Err(err)
         }
     }
     
@@ -572,23 +773,60 @@ impl Clipboard {
         &self.last_copy
     }
     
+    /// Get the current clipboard status
+    pub fn get_status(&self) -> ClipboardStatus {
+        let platform_info = self.get_clipboard_info();
+        
+        ClipboardStatus {
+            method: self.current_method,
+            native_available: self.check_native_available(),
+            osc52_enabled: self.use_osc52,
+            last_error: self.last_error.as_ref().map(|e| e.to_string()),
+            platform_info,
+        }
+    }
+    
+    /// Check if native clipboard is available
+    fn check_native_available(&self) -> bool {
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            linux_clipboard::detect_clipboard_tool().is_some()
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            true // Assume native clipboard is always available on Windows and macOS
+        }
+    }
+    
     /// Get information about clipboard support (for debugging)
     pub fn get_clipboard_info(&self) -> String {
         #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
         {
             let session = linux_clipboard::detect_session_type();
             let tool = linux_clipboard::detect_clipboard_tool();
-            format!("Linux session: {:?}, Tool: {:?}, OSC52 fallback: {}", 
-                    session, tool, self.use_osc52)
+            format!("Linux session: {:?}, Tool: {:?}, OSC52 fallback: {}, Current method: {:?}", 
+                    session, tool, self.use_osc52, self.current_method)
         }
         #[cfg(target_os = "windows")]
         {
-            format!("Windows native clipboard, OSC52 fallback: {}", self.use_osc52)
+            format!("Windows native clipboard, OSC52 fallback: {}, Current method: {:?}", 
+                    self.use_osc52, self.current_method)
         }
         #[cfg(target_os = "macos")]
         {
-            format!("macOS pbcopy/pbpaste, OSC52 fallback: {}", self.use_osc52)
+            format!("macOS pbcopy/pbpaste, OSC52 fallback: {}, Current method: {:?}", 
+                    self.use_osc52, self.current_method)
         }
+    }
+    
+    /// Clear the last error
+    pub fn clear_error(&mut self) {
+        self.last_error = None;
+    }
+    
+    /// Get the last error if any
+    pub fn last_error(&self) -> Option<&ClipboardError> {
+        self.last_error.as_ref()
     }
 }
 
@@ -600,7 +838,7 @@ impl Default for Clipboard {
 
 // Re-export Selection for Linux users
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-pub use linux_clipboard::Selection;
+pub use self::linux_clipboard::Selection;
 
 #[cfg(test)]
 mod tests {

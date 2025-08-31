@@ -22,6 +22,10 @@ pub struct Terminal {
     #[cfg(target_os = "windows")]
     #[allow(dead_code)]
     pub shell: (),
+    // Clipboard configuration
+    pub clipboard_use_osc52: bool,
+    pub clipboard_max_retries: usize,
+    pub clipboard_verbose_logging: bool,
 }
 
 impl Default for Terminal {
@@ -33,6 +37,9 @@ impl Default for Terminal {
             shell: Shell::Bash,
             #[cfg(target_os = "windows")]
             shell: (),
+            clipboard_use_osc52: true,
+            clipboard_max_retries: 3,
+            clipboard_verbose_logging: false,
         }
     }
 }
@@ -60,6 +67,23 @@ impl LuaUserData for Terminal {
         fields.add_field_method_get("shell", |_, _| Ok("windows not supported"));
         #[cfg(target_os = "windows")]
         fields.add_field_method_set("shell", |_, _, _: String| Ok(()));
+        
+        // Clipboard configuration fields
+        fields.add_field_method_get("clipboard_use_osc52", |_, this| Ok(this.clipboard_use_osc52));
+        fields.add_field_method_set("clipboard_use_osc52", |_, this, value| {
+            this.clipboard_use_osc52 = value;
+            Ok(())
+        });
+        fields.add_field_method_get("clipboard_max_retries", |_, this| Ok(this.clipboard_max_retries));
+        fields.add_field_method_set("clipboard_max_retries", |_, this, value| {
+            this.clipboard_max_retries = value;
+            Ok(())
+        });
+        fields.add_field_method_get("clipboard_verbose_logging", |_, this| Ok(this.clipboard_verbose_logging));
+        fields.add_field_method_set("clipboard_verbose_logging", |_, this, value| {
+            this.clipboard_verbose_logging = value;
+            Ok(())
+        });
     }
 }
 

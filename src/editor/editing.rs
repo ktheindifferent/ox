@@ -244,7 +244,24 @@ impl Editor {
     pub fn copy(&mut self) -> Result<()> {
         if let Some(doc) = self.try_doc() {
             let selected_text = doc.selection_text();
-            self.terminal.copy(&selected_text)
+            match self.terminal.copy(&selected_text) {
+                Ok(method) => {
+                    use crate::clipboard::ClipboardMethod;
+                    use crate::ui::Feedback;
+                    let method_str = match method {
+                        ClipboardMethod::Native => "native clipboard",
+                        ClipboardMethod::OSC52 => "terminal clipboard (OSC52)",
+                        ClipboardMethod::Cached => "internal cache",
+                    };
+                    self.feedback = Feedback::Info(format!("Copied to {} ({} chars)", method_str, selected_text.len()));
+                    Ok(())
+                }
+                Err(e) => {
+                    use crate::ui::Feedback;
+                    self.feedback = Feedback::Warning(format!("Clipboard warning: {}", e));
+                    Ok(()) // Don't fail the operation, just show warning
+                }
+            }
         } else {
             Ok(())
         }
