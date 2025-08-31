@@ -126,6 +126,9 @@ fn run(cli: &CommandLineInterface) -> Result<()> {
     let editor = lua.create_userdata(editor)?;
     lua.globals().set("editor", editor.clone())?;
 
+    // Register path utilities for cross-platform path handling
+    crate::config::path_utils::register_path_utils(&lua)?;
+
     // Inject the networking library for plug-ins to use
     handle_lua_error(
         "",

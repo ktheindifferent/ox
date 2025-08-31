@@ -24,7 +24,12 @@ end
 
 function git:repo_path()
     local repo_path_output = shell:output("git rev-parse --show-toplevel")
-    return repo_path_output:gsub("[\r\n]+", "")
+    local cleaned_path = repo_path_output:gsub("[\r\n]+", "")
+    -- Normalize the path for the current platform
+    if path_utils and path_utils.normalize then
+        return path_utils.normalize(cleaned_path)
+    end
+    return cleaned_path
 end
 
 function git:refresh_status()
@@ -39,6 +44,10 @@ function git:refresh_status()
             local staged_status = line:sub(1, 1)
             local unstaged_status = line:sub(2, 2)
             local file_name = build_path(repo_path, line:sub(4))
+            -- Normalize path if utilities are available
+            if path_utils and path_utils.normalize then
+                file_name = path_utils.normalize(file_name)
+            end
             local staged
             local modified
             if self.icons then
@@ -179,7 +188,12 @@ commands["git"] = function(args)
         elseif args[1] == "stat" then
             local stats = git:get_stats()
             for _, t in ipairs(stats.files) do
-                if build_path(repo_path, t.file) == editor.file_path then
+                local file_path = build_path(repo_path, t.file)
+                -- Normalize paths for comparison
+                if path_utils and path_utils.normalize then
+                    file_path = path_utils.normalize(file_path)
+                end
+                if file_path == editor.file_path then
                     editor:display_info(string.format(
                         "%s: %s insertions, %s deletions",
                         t.file, t.insertions, t.deletions

@@ -2,10 +2,155 @@
 home = os.getenv("HOME") or os.getenv("USERPROFILE")
 path_sep = package.config:sub(1,1)
 
+-- Path utilities module for cross-platform compatibility
+path_utils = {}
+
+-- Get the platform path separator
+function path_utils.separator()
+    return path_sep
+end
+
+-- Check if running on Windows
+function path_utils.is_windows()
+    return path_sep == "\\"
+end
+
 -- Cross-platform path construction helper
 function build_path(...)
     local parts = {...}
-    return table.concat(parts, path_sep)
+    -- Filter out empty strings and nil values
+    local filtered = {}
+    for _, part in ipairs(parts) do
+        if part and part ~= "" then
+            table.insert(filtered, part)
+        end
+    end
+    return table.concat(filtered, path_sep)
+end
+
+-- Normalize path separators for the current platform
+function path_utils.normalize(path)
+    if not path then return nil end
+    -- Replace all forward slashes with backslashes on Windows
+    if path_utils.is_windows() then
+        return path:gsub("/", "\\")
+    else
+        -- Replace all backslashes with forward slashes on Unix
+        return path:gsub("\\", "/")
+    end
+end
+
+-- Join path components safely
+function path_utils.join(...)
+    return build_path(...)
+end
+
+-- Get the directory part of a path
+function path_utils.dirname(path)
+    if not path then return nil end
+    path = path_utils.normalize(path)
+    local last_sep = path:match(".*()[" .. path_sep .. "]")
+    if last_sep then
+        return path:sub(1, last_sep - 1)
+    end
+    return "."
+end
+
+-- Get the filename part of a path
+function path_utils.basename(path)
+    if not path then return nil end
+    path = path_utils.normalize(path)
+    local last_sep = path:match(".*()[" .. path_sep .. "]")
+    if last_sep then
+        return path:sub(last_sep + 1)
+    end
+    return path
+end
+
+-- Expand home directory in paths
+function path_utils.expand_home(path)
+    if not path then return nil end
+    if path:sub(1, 2) == "~/" or path:sub(1, 2) == "~\\" then
+        return home .. path:sub(2)
+    elseif path == "~" then
+        return home
+    end
+    return path
+end
+
+-- Make a path absolute (resolve relative paths)
+function path_utils.absolute(path)
+    if not path then return nil end
+    path = path_utils.expand_home(path)
+    path = path_utils.normalize(path)
+    
+    -- Check if already absolute
+    if path_utils.is_windows() then
+        -- Windows absolute paths start with drive letter or \\
+        if path:match("^[A-Za-z]:") or path:match("^\\\\") then
+            return path
+        end
+    else
+        -- Unix absolute paths start with /
+        if path:sub(1, 1) == "/" then
+            return path
+        end
+    end
+    
+    -- Make relative path absolute by prepending current directory
+    local pwd = shell:output("pwd"):gsub("[\r\n]+", "")
+    if path_utils.is_windows() then
+        pwd = shell:output("cd"):gsub("[\r\n]+", "")
+    end
+    return path_utils.join(pwd, path)
+end
+
+-- Check if a path exists (file or directory)
+function path_utils.exists(path)
+    if not path then return false end
+    path = path_utils.expand_home(path)
+    path = path_utils.normalize(path)
+    return file_exists(path) or dir_exists(path)
+end
+
+-- Split a path into components
+function path_utils.split(path)
+    if not path then return {} end
+    path = path_utils.normalize(path)
+    local parts = {}
+    for part in path:gmatch("[^" .. path_sep .. "]+") do
+        table.insert(parts, part)
+    end
+    return parts
+end
+
+-- Get file extension
+function path_utils.extension(path)
+    if not path then return nil end
+    local basename = path_utils.basename(path)
+    local ext = basename:match("%.([^%.]+)$")
+    return ext
+end
+
+-- Remove file extension
+function path_utils.remove_extension(path)
+    if not path then return nil end
+    local dir = path_utils.dirname(path)
+    local basename = path_utils.basename(path)
+    local name = basename:match("^(.+)%.[^%.]+$") or basename
+    if dir == "." then
+        return name
+    end
+    return path_utils.join(dir, name)
+end
+
+-- Backward compatibility aliases
+function normalize_path(path)
+    return path_utils.normalize(path)
+end
+
+function expand_home_path(path)
+    return path_utils.expand_home(path)
 end
 
 -- Get appropriate config directory based on platform
