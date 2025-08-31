@@ -468,6 +468,7 @@ dependencies = [
  "mio",
  "mlua",
  "nix 0.29.0",
+ "once_cell",
  "portable-pty",
  "ptyprocess",
  "regex",

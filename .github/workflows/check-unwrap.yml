@@ -1,0 +1,59 @@
+name: Check for Unwrap Usage
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  check-unwrap:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Check for unwrap() in non-test code
+      run: |
+        # Find all .rs files excluding test files and directories
+        FILES=$(find src -name "*.rs" -type f | grep -v test | grep -v tests)
+        
+        # Count unwrap() calls in production code
+        UNWRAP_COUNT=0
+        for file in $FILES; do
+          count=$(grep -o "\.unwrap()" "$file" 2>/dev/null | wc -l || echo 0)
+          if [ "$count" -gt 0 ]; then
+            echo "Found $count unwrap() calls in $file"
+            UNWRAP_COUNT=$((UNWRAP_COUNT + count))
+          fi
+        done
+        
+        if [ "$UNWRAP_COUNT" -gt 0 ]; then
+          echo "❌ Found $UNWRAP_COUNT unwrap() calls in production code!"
+          echo "Please replace unwrap() with proper error handling."
+          exit 1
+        else
+          echo "✅ No unwrap() calls found in production code."
+        fi
+    
+    - name: Check for expect() without context
+      run: |
+        # Find expect() calls without descriptive messages
+        FILES=$(find src -name "*.rs" -type f | grep -v test | grep -v tests)
+        
+        BAD_EXPECTS=0
+        for file in $FILES; do
+          # Look for expect("") or expect with very short messages
+          if grep -E '\.expect\(""\)|\.expect\("[^"]{1,5}"\)' "$file" 2>/dev/null; then
+            echo "Found expect() with insufficient context in $file"
+            BAD_EXPECTS=$((BAD_EXPECTS + 1))
+          fi
+        done
+        
+        if [ "$BAD_EXPECTS" -gt 0 ]; then
+          echo "⚠️  Found expect() calls with insufficient error context."
+          echo "Please provide descriptive error messages in expect() calls."
+          # Don't fail the build for this, just warn
+        else
+          echo "✅ All expect() calls have descriptive messages."
+        fi
