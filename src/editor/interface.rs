@@ -207,9 +207,13 @@ impl Editor {
         // Update all document's size
         let updates = self.files.update_doc_sizes(&self.render_cache.span, self);
         for (ptr, doc_idx, new_size) in updates {
-            let doc = &mut self.files.get_atom_mut(ptr.clone()).unwrap().0[doc_idx].doc;
-            doc.size = new_size;
-            doc.load_to(doc.offset.y + doc.size.h + 1);
+            let (fcs, _) = self.files.get_atom_mut(ptr.clone())
+                .ok_or_else(|| crate::error::OxError::DocumentNotFound { index: 0 })?;
+            if let Some(fc) = fcs.get_mut(doc_idx) {
+                let doc = &mut fc.doc;
+                doc.size = new_size;
+                doc.load_to(doc.offset.y + doc.size.h + 1);
+            }
             self.update_highlighter_for(&ptr, doc_idx);
         }
         // Hide the cursor before rendering
@@ -245,7 +249,8 @@ impl Editor {
         match (in_file_tree, in_terminal) {
             // Move cursor to location within file
             (false, false) => {
-                let Loc { x, y } = self.try_doc().unwrap().cursor_loc_in_screen()?;
+                let doc = self.try_doc()?;
+                let Loc { x, y } = doc.cursor_loc_in_screen()?;
                 for (ptr, rows, cols) in &self.render_cache.span {
                     if ptr == &self.ptr {
                         return Some(Loc {
@@ -291,7 +296,8 @@ impl Editor {
         let line_numbers_enabled = config!(self.config, line_numbers).enabled;
         let ln_pad_left = config!(self.config, line_numbers).padding_left;
         let ln_pad_right = config!(self.config, line_numbers).padding_right;
-        let fc = self.files.get(ptr.to_owned()).unwrap();
+        let fc = self.files.get(ptr.to_owned())
+            .ok_or_else(|| crate::error::OxError::DocumentNotFound { index: 0 })?;
         let doc = &fc.doc;
         let selection = doc.selection_loc_bound_disp();
         let has_file = doc.file_name.is_none();
@@ -897,7 +903,9 @@ impl Editor {
 
     /// Update highlighter of a certain document
     pub fn update_highlighter_for(&mut self, ptr: &[usize], doc: usize) {
-        let percieved = self.highlighter_for(ptr.to_owned(), doc).line_ref.len();
+        let percieved = self.highlighter_for(ptr.to_owned(), doc)
+            .map(|h| h.line_ref.len())
+            .unwrap_or(0);
         if self.active {
             if let Some((ref mut fcs, _)) = self.files.get_atom_mut(ptr.to_owned()) {
                 let actual = fcs[doc].doc.info.loaded_to;
@@ -913,18 +921,23 @@ impl Editor {
     }
 
     /// Returns a highlighter at a certain index
-    pub fn get_highlighter(&mut self, idx: usize) -> &mut Highlighter {
-        &mut self.files.get_atom_mut(self.ptr.clone()).unwrap().0[idx].highlighter
+    pub fn get_highlighter(&mut self, idx: usize) -> Option<&mut Highlighter> {
+        self.files.get_atom_mut(self.ptr.clone())
+            .and_then(|(fcs, _)| fcs.get_mut(idx))
+            .map(|fc| &mut fc.highlighter)
     }
 
     /// Gets a mutable reference to the current document
-    pub fn highlighter(&mut self) -> &mut Highlighter {
-        &mut self.files.get_mut(self.ptr.clone()).unwrap().highlighter
+    pub fn highlighter(&mut self) -> Option<&mut Highlighter> {
+        self.files.get_mut(self.ptr.clone())
+            .map(|fc| &mut fc.highlighter)
     }
 
     /// Gets a mutable reference to the current document
-    pub fn highlighter_for(&self, ptr: Vec<usize>, doc: usize) -> &Highlighter {
-        &self.files.get_atom(ptr).unwrap().0[doc].highlighter
+    pub fn highlighter_for(&self, ptr: Vec<usize>, doc: usize) -> Option<&Highlighter> {
+        self.files.get_atom(ptr)
+            .and_then(|(fcs, _)| fcs.get(doc))
+            .map(|fc| &fc.highlighter)
     }
 
     /// Reload the whole document in the highlighter

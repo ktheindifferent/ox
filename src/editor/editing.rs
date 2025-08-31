@@ -128,7 +128,9 @@ impl Editor {
                 };
                 
                 if !read_only {
-                    self.highlighter().remove_line(loc.y);
+                    if let Some(h) = self.highlighter() {
+                        h.remove_line(loc.y);
+                    }
                 }
                 loc.y = loc.y.saturating_sub(1);
                 
@@ -197,7 +199,9 @@ impl Editor {
                 let read_only = doc.info.read_only;
                 self.exe(Event::InsertLine(y, String::new()))?;
                 if !read_only {
-                    self.highlighter().append("");
+                    if let Some(h) = self.highlighter() {
+                        h.append("");
+                    }
                 }
             }
         }
@@ -214,7 +218,9 @@ impl Editor {
                     let read_only = doc.info.read_only;
                     self.exe(Event::DeleteLine(y, line))?;
                     if !read_only {
-                        self.highlighter().remove_line(y);
+                        if let Some(h) = self.highlighter() {
+                            h.remove_line(y);
+                        }
                     }
                 }
             }
@@ -266,7 +272,9 @@ impl Editor {
     pub fn hl_edit(&mut self, y: usize) {
         if let Some(doc) = self.try_doc() {
             let line = doc.line(y).unwrap_or_default();
-            self.highlighter().edit(y, &line);
+            if let Some(h) = self.highlighter() {
+                h.edit(y, &line);
+            }
         }
     }
 }

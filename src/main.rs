@@ -13,6 +13,7 @@ mod pty_error;
 #[cfg(target_os = "windows")]
 mod conpty_windows;
 mod pty_cross;
+mod regex_cache;
 mod terminal;
 mod ui;
 
@@ -207,12 +208,17 @@ fn run(cli: &CommandLineInterface) -> Result<()> {
         holder.blank()?;
         let this_doc = holder.doc_len().saturating_sub(1);
         let current_ptr = holder.ptr.clone();
-        let doc = &mut holder.files.get_atom_mut(current_ptr).unwrap().0[this_doc].doc;
+        let (fcs, _) = holder.files.get_atom_mut(current_ptr)
+            .ok_or(OxError::DocumentNotFound { index: this_doc })?;
+        let doc = &mut fcs.get_mut(this_doc)
+            .ok_or(OxError::DocumentNotFound { index: this_doc })?
+            .doc;
         doc.exe(Event::Insert(Loc { x: 0, y: 0 }, stdin))?;
         doc.load_to(doc.size.h);
         let lines = doc.lines.clone();
-        let hl = holder.get_highlighter(this_doc);
-        hl.run(&lines);
+        if let Some(hl) = holder.get_highlighter(this_doc) {
+            hl.run(&lines);
+        }
         if cli.flags.read_only {
             holder.get_doc(this_doc).info.read_only = true;
         }
