@@ -13,6 +13,7 @@ mod filetree;
 mod highlighting;
 mod interface;
 mod keys;
+pub mod path_utils;
 mod runner;
 mod tasks;
 
