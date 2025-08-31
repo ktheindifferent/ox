@@ -19,24 +19,45 @@ use std::path::PathBuf;
 use winapi::ctypes::c_void;
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::winerror::S_OK;
-use winapi::um::consoleapi::{ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole};
-use winapi::um::fileapi::{CreateFileW, ReadFile, WriteFile, OPEN_EXISTING};
-use winapi::um::handleapi::{CloseHandle, DuplicateHandle, SetHandleInformation, INVALID_HANDLE_VALUE};
+use winapi::um::fileapi::{ReadFile, WriteFile};
+use winapi::um::handleapi::{CloseHandle, SetHandleInformation, INVALID_HANDLE_VALUE};
 use winapi::um::namedpipeapi::CreatePipe;
 use winapi::um::processthreadsapi::{
-    CreateProcessW, GetCurrentProcess, GetExitCodeProcess, TerminateProcess,
-    PROCESS_INFORMATION, STARTUPINFOW, STARTUPINFOEXW
+    CreateProcessW, GetExitCodeProcess, TerminateProcess,
+    InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList,
+    PROCESS_INFORMATION, STARTUPINFOW
 };
 use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::{
     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, 
-    HANDLE_FLAG_INHERIT, INFINITE, WAIT_TIMEOUT
+    HANDLE_FLAG_INHERIT, INFINITE, WAIT_TIMEOUT, STARTUPINFOEXW
 };
 use winapi::um::wincon::COORD;
 use winapi::um::wincontypes::HPCON;
 
 const PIPE_BUFFER_SIZE: usize = 65536;
 const READ_TIMEOUT_MS: u32 = 50;
+const STILL_ACTIVE: DWORD = 259;
+const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
+
+// ConPTY function declarations (Windows 10 1809+)
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreatePseudoConsole(
+        size: COORD,
+        hInput: winapi::um::winnt::HANDLE,
+        hOutput: winapi::um::winnt::HANDLE,
+        dwFlags: DWORD,
+        phPC: *mut HPCON,
+    ) -> winapi::shared::minwindef::HRESULT;
+    
+    fn ResizePseudoConsole(
+        hPC: HPCON,
+        size: COORD,
+    ) -> winapi::shared::minwindef::HRESULT;
+    
+    fn ClosePseudoConsole(hPC: HPCON);
+}
 
 /// Represents a Windows ConPTY instance
 pub struct ConPty {
@@ -106,7 +127,7 @@ impl ConPty {
 
             // Initialize the process thread attribute list
             let mut attr_size: usize = 0;
-            winapi::um::processthreadsapi::InitializeProcThreadAttributeList(
+            InitializeProcThreadAttributeList(
                 ptr::null_mut(),
                 1,
                 0,
@@ -116,7 +137,7 @@ impl ConPty {
             let mut attr_list = vec![0u8; attr_size];
             startup_info.lpAttributeList = attr_list.as_mut_ptr() as *mut c_void;
 
-            if winapi::um::processthreadsapi::InitializeProcThreadAttributeList(
+            if InitializeProcThreadAttributeList(
                 startup_info.lpAttributeList,
                 1,
                 0,
@@ -130,17 +151,17 @@ impl ConPty {
             }
 
             // Associate the ConPTY with the attribute list
-            if winapi::um::processthreadsapi::UpdateProcThreadAttribute(
+            if UpdateProcThreadAttribute(
                 startup_info.lpAttributeList,
                 0,
-                0x00020016, // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
                 hpc as *mut c_void,
                 mem::size_of::<HPCON>(),
                 ptr::null_mut(),
                 ptr::null_mut()
             ) == FALSE
             {
-                winapi::um::processthreadsapi::DeleteProcThreadAttributeList(startup_info.lpAttributeList);
+                DeleteProcThreadAttributeList(startup_info.lpAttributeList);
                 ClosePseudoConsole(hpc);
                 CloseHandle(input_write);
                 CloseHandle(output_read);
@@ -181,7 +202,7 @@ impl ConPty {
             ) == FALSE
             {
                 let err = Error::last_os_error();
-                winapi::um::processthreadsapi::DeleteProcThreadAttributeList(startup_info.lpAttributeList);
+                DeleteProcThreadAttributeList(startup_info.lpAttributeList);
                 ClosePseudoConsole(hpc);
                 CloseHandle(input_write);
                 CloseHandle(output_read);
@@ -192,7 +213,7 @@ impl ConPty {
             }
 
             // Clean up the attribute list
-            winapi::um::processthreadsapi::DeleteProcThreadAttributeList(startup_info.lpAttributeList);
+            DeleteProcThreadAttributeList(startup_info.lpAttributeList);
 
             // Create the ConPty instance
             let is_alive = Arc::new(AtomicBool::new(true));
@@ -221,20 +242,20 @@ impl ConPty {
         // ConPTY is available on Windows 10 version 1809 (build 17763) and later
         // Try to dynamically check if the ConPTY APIs are available
         unsafe {
+            use std::ffi::CString;
+            use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
+            
             // Check if we can load the ConPTY functions from kernel32.dll
-            let kernel32 = winapi::um::libloaderapi::GetModuleHandleW(
-                "kernel32.dll\0".encode_utf16().collect::<Vec<u16>>().as_ptr()
-            );
+            let kernel32_name = CString::new("kernel32.dll").unwrap();
+            let kernel32 = GetModuleHandleA(kernel32_name.as_ptr());
             
             if kernel32.is_null() {
                 return false;
             }
             
             // Check if CreatePseudoConsole is available
-            let create_pty_fn = winapi::um::libloaderapi::GetProcAddress(
-                kernel32,
-                "CreatePseudoConsole\0".as_ptr() as *const i8
-            );
+            let fn_name = CString::new("CreatePseudoConsole").unwrap();
+            let create_pty_fn = GetProcAddress(kernel32, fn_name.as_ptr());
             
             !create_pty_fn.is_null()
         }
@@ -392,7 +413,7 @@ impl ConPty {
         unsafe {
             let mut exit_code: DWORD = 0;
             if GetExitCodeProcess(self.process_info.hProcess, &mut exit_code) != FALSE {
-                exit_code == 259 // STILL_ACTIVE
+                exit_code == STILL_ACTIVE
             } else {
                 false
             }
@@ -404,7 +425,7 @@ impl ConPty {
         unsafe {
             let mut exit_code: DWORD = 0;
             if GetExitCodeProcess(self.process_info.hProcess, &mut exit_code) != FALSE {
-                if exit_code != 259 { // STILL_ACTIVE
+                if exit_code != STILL_ACTIVE {
                     Some(exit_code)
                 } else {
                     None

@@ -442,6 +442,7 @@ dependencies = [
  "regex",
  "shellexpand",
  "synoptic",
+ "which",
  "winapi",
  "windows",
 ]

@@ -60,6 +60,7 @@ nix = { version = "0.29.0", features = ["fs"] }
 # Windows dependencies (for terminal)
 [target.'cfg(target_os = "windows")'.dependencies]
 portable-pty = "0.9.0"
+which = "6.0"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Console", 
@@ -71,4 +72,4 @@ windows = { version = "0.58", features = [
     "Win32_System_WindowsProgramming",
     "Win32_Globalization",
 ] }
-winapi = { version = "0.3", features = ["consoleapi", "processthreadsapi", "wincon", "handleapi", "synchapi", "winbase", "namedpipeapi", "fileapi"] }
+winapi = { version = "0.3", features = ["consoleapi", "processthreadsapi", "wincon", "wincontypes", "handleapi", "synchapi", "winbase", "namedpipeapi", "fileapi", "minwinbase", "libloaderapi", "processenv"] }
