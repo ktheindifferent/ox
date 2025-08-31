@@ -434,6 +434,7 @@ dependencies = [
  "error_set",
  "jargon-args",
  "kaolinite",
+ "log",
  "mio",
  "mlua",
  "nix 0.29.0",

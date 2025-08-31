@@ -50,6 +50,7 @@ error_set = "0.7"
 shellexpand = "3.1.0"
 synoptic = "2.2.9"
 regex = "1.11.1"
+log = "0.4"
 
 # Non-windows dependencies (for terminal)
 [target.'cfg(not(target_os = "windows"))'.dependencies]

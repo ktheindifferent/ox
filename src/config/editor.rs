@@ -371,6 +371,18 @@ impl LuaUserData for Editor {
             }
             Ok(())
         });
+        methods.add_method("clipboard_info", |_, editor, ()| {
+            let status = editor.terminal.clipboard_status();
+            let info = format!(
+                "Clipboard Status:\n  Method: {:?}\n  Native Available: {}\n  OSC52 Enabled: {}\n  Platform: {}\n  Last Error: {}",
+                status.method,
+                status.native_available,
+                status.osc52_enabled,
+                status.platform_info,
+                status.last_error.as_deref().unwrap_or("None")
+            );
+            Ok(info)
+        });
         // Document editing
         methods.add_method_mut(
             "insert_at",

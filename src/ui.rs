@@ -1,5 +1,5 @@
 /// Utilities for rendering the user interface
-use crate::clipboard::Clipboard;
+use crate::clipboard::{Clipboard, ClipboardMethod, ClipboardStatus};
 use crate::config::{Colors, Terminal as TerminalConfig};
 use crate::editor::MacroMan;
 use crate::error::Result;
@@ -163,15 +163,36 @@ pub struct Terminal {
     pub cache: String,
     pub config: AnyUserData,
     pub last_copy: String,
+    pub clipboard: Clipboard,
 }
 
 impl Terminal {
     pub fn new(config: AnyUserData) -> Self {
+        // Get configuration values
+        let (use_osc52, max_retries, verbose_logging) = {
+            let cfg = config.borrow::<crate::config::Terminal>()
+                .expect("Failed to borrow terminal config");
+            (cfg.clipboard_use_osc52, cfg.clipboard_max_retries as u32, cfg.clipboard_verbose_logging)
+        };
+        
+        // Build clipboard with configuration
+        let mut clipboard = Clipboard::new()
+            .with_max_retries(max_retries);
+        
+        if use_osc52 {
+            clipboard = clipboard.with_osc52_fallback();
+        }
+        
+        if verbose_logging {
+            clipboard = clipboard.with_verbose_logging();
+        }
+        
         Terminal {
             stdout: stdout(),
             cache: String::with_capacity(size().map(|s| s.w * s.h).unwrap_or(1000)),
             config,
             last_copy: String::new(),
+            clipboard,
         }
     }
 
@@ -271,23 +292,24 @@ impl Terminal {
         Ok(())
     }
 
-    /// Put text into the clipboard
-    pub fn copy(&mut self, text: &str) -> Result<()> {
+    /// Put text into the clipboard and return status
+    pub fn copy(&mut self, text: &str) -> Result<ClipboardMethod> {
         self.last_copy = text.to_string();
         
-        // Try native clipboard first
-        let mut clipboard = Clipboard::new();
-        if let Ok(()) = clipboard.set_text(text) {
-            return Ok(());
+        match self.clipboard.set_text(text) {
+            Ok(()) => Ok(self.clipboard.current_method),
+            Err(e) => {
+                // Log the error but don't fail - the clipboard has fallback mechanisms
+                log::warn!("Clipboard operation warning: {}", e);
+                // Return the method that was used (could be OSC52 or cached)
+                Ok(self.clipboard.current_method)
+            }
         }
-        
-        // Fall back to OSC 52 sequence for terminal clipboard
-        write!(
-            self.stdout,
-            "\x1b]52;c;{}\x1b\\",
-            BASE64_STANDARD.encode(text)
-        )?;
-        Ok(())
+    }
+    
+    /// Get the clipboard status for diagnostics
+    pub fn clipboard_status(&self) -> ClipboardStatus {
+        self.clipboard.get_status()
     }
 }
 
