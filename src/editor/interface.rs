@@ -680,7 +680,9 @@ impl Editor {
                 " ".repeat(pad)
             ))
         } else {
-            unreachable!()
+            // Terminal was expected but not found - return empty line to avoid panic
+            // This can happen if the file layout changes between checking and rendering
+            Ok(" ".repeat(l))
         }
     }
 
@@ -956,5 +958,123 @@ impl Editor {
         } else {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::Editor;
+
+    /// Create a test editor instance
+    fn create_test_editor() -> Editor {
+        use crate::config::Config;
+        use crate::editor::MacroMan;
+        use mlua::Lua;
+        use std::time::Instant;
+        
+        let lua = Lua::new();
+        let config = Config::new(&lua).unwrap();
+        Editor {
+            terminal: crate::ui::Terminal::new(config.terminal.clone()),
+            needs_rerender: false,
+            config,
+            files: FileLayout::Atom(vec![], 0),
+            ptr: vec![],
+            active: true,
+            greet: false,
+            feedback: crate::ui::Feedback::None,
+            command: None,
+            last_active: Instant::now(),
+            push_down: 0,
+            config_path: String::new(),
+            plugin_active: false,
+            pasting: false,
+            last_click: None,
+            alt_click_state: None,
+            macro_man: MacroMan::default(),
+            render_cache: RenderCache::default(),
+            file_tree: None,
+            file_tree_selection: None,
+            old_ptr: vec![],
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_render_terminal_with_non_terminal_layout() {
+        let mut editor = create_test_editor();
+        
+        // Set up the file layout as None
+        editor.files = FileLayout::None;
+        
+        // Test rendering when the layout is not a terminal
+        // This should return an empty line instead of panicking
+        let result = editor.render_terminal(&vec![], 0, 50, 10);
+        assert!(result.is_ok());
+        
+        let rendered = result.unwrap();
+        assert_eq!(rendered, " ".repeat(50));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_render_terminal_with_file_tree_layout() {
+        let mut editor = create_test_editor();
+        
+        // Set up the file layout as FileTree
+        editor.files = FileLayout::FileTree;
+        
+        // Test rendering when the layout is a file tree
+        // This should return an empty line instead of panicking
+        let result = editor.render_terminal(&vec![], 0, 30, 5);
+        assert!(result.is_ok());
+        
+        let rendered = result.unwrap();
+        assert_eq!(rendered, " ".repeat(30));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_render_terminal_with_atom_layout() {
+        let mut editor = create_test_editor();
+        
+        // Set up the file layout as an Atom with empty containers
+        editor.files = FileLayout::Atom(vec![], 0);
+        
+        // Test rendering when the layout is an Atom
+        // This should return an empty line instead of panicking
+        let result = editor.render_terminal(&vec![], 0, 40, 8);
+        assert!(result.is_ok());
+        
+        let rendered = result.unwrap();
+        assert_eq!(rendered, " ".repeat(40));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_render_terminal_on_windows() {
+        let mut editor = create_test_editor();
+        
+        // On Windows, render_terminal should always return spaces
+        let result = editor.render_terminal(&vec![], 0, 60, 10);
+        assert!(result.is_ok());
+        
+        let rendered = result.unwrap();
+        assert_eq!(rendered, " ".repeat(60));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_render_terminal_layout_change() {
+        let mut editor = create_test_editor();
+        
+        // Start with FileLayout::None
+        editor.files = FileLayout::None;
+        
+        // This should not panic but return empty spaces
+        let result = editor.render_terminal(&vec![], 0, 20, 5);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), " ".repeat(20));
     }
 }
