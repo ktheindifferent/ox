@@ -34,6 +34,34 @@ error_set! {
             msg: String
         },
         InvalidPath,
+        #[display("Regex compilation failed: {}", msg)]
+        RegexCompilation {
+            msg: String
+        },
+        #[display("Parse error: {}", msg)]
+        Parse {
+            msg: String
+        },
+        #[display("Document not found at index {}", index)]
+        DocumentNotFound {
+            index: usize
+        },
+        #[display("Invalid color format: {}", color)]
+        InvalidColor {
+            color: String
+        },
+        #[display("Terminal configuration error: {}", msg)]
+        TerminalConfig {
+            msg: String
+        },
+        #[display("Clipboard operation failed: {}", msg)]
+        Clipboard {
+            msg: String
+        },
+        #[display("Internal error: {}", msg)]
+        Internal {
+            msg: String
+        },
         // None, <--- Needed???
     };
 }
